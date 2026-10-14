@@ -1,0 +1,2082 @@
+// =============================================================================
+// CEIBA API Studio - Modelo relacional (DBML para dbdiagram.io)
+// Autor: database-engineer   Fecha: 2026-10-14
+// Motor objetivo: PostgreSQL 16+
+//
+// ESTADO: ESCRITO Y REVISADO, **NO EJECUTADO**.
+// En este contenedor NO existe PostgreSQL ni psql (verificado 2026-10-14:
+// `command -v psql` -> no encontrado; no hay /usr/lib/postgresql; no hay docker).
+// Ninguna sentencia DDL derivada de este fichero se ha ejecutado contra un motor
+// real. Ver MODELO-DATOS.md, seccion "Validacion", para los comandos exactos que
+// habria que correr donde si haya motor.
+//
+// Convenciones:
+//  - snake_case plural para tablas, singular para columnas.
+//  - PK uuid v7 (orden temporal -> mejor localidad en indices que v4).
+//    AVISO: `uuidv7()` es nativo en PostgreSQL 18. En PostgreSQL 16/17 NO existe:
+//    hay que generarlo en la aplicacion o sustituir el default por
+//    `gen_random_uuid()` (pgcrypto/nativo desde PG13). Decidir en la migracion;
+//    el modelo no depende de cual se elija, solo del tipo `uuid`.
+//  - Toda FK lleva politica de borrado EXPLICITA en la seccion RELACIONES.
+//  - `deleted_at` = borrado logico recuperable. Su ausencia = borrado fisico.
+//  - DBML no expresa CHECK, indices parciales, particiones ni triggers:
+//    estan documentados en MODELO-DATOS.md y referenciados en las notas.
+// =============================================================================
+
+Project ceiba_api_studio {
+  database_type: 'PostgreSQL'
+  Note: '''
+  Modelo relacional normalizado de CEIBA API Studio.
+
+  Tres invariantes de seguridad no negociables (seccion 17 del prompt maestro):
+  1. Los codigos de acceso se guardan HASHEADOS (selector + verifier_hash).
+     No existe ninguna columna de codigo en claro en todo el esquema.
+  2. Los metadatos de coleccion viven en un subgrafo distinto al de los
+     secretos. `collections` no alcanza `secrets` por ninguna ruta de FK:
+     el unico puente es `auth_credentials`, que el serializador de
+     publicacion/exportacion NO recorre nunca.
+  3. Los cuerpos de respuesta NO se guardan indefinidamente:
+     `response_artifacts` nace con `expires_at` obligatorio y la politica por
+     defecto del workspace es no persistir cuerpo alguno.
+  '''
+}
+
+// =============================================================================
+// ENUMS
+// =============================================================================
+
+Enum user_status {
+  active
+  invited
+  suspended
+  deactivated
+}
+
+Enum workspace_role {
+  owner    [note: 'Administra workspace y miembros. Unico que transfiere propiedad y borra el workspace.']
+  admin    [note: 'Gestiona recursos y permisos salvo operaciones reservadas al propietario.']
+  editor   [note: 'Crea, modifica, mueve y organiza recursos autorizados.']
+  executor [note: 'Ejecuta solicitudes y pruebas sin alterar la estructura compartida.']
+  viewer   [note: 'Solo lectura de recursos autorizados.']
+}
+
+Enum membership_status {
+  active
+  suspended
+  removed
+}
+
+Enum invitation_status {
+  pending
+  accepted
+  revoked
+  expired
+}
+
+Enum lifecycle_status {
+  active
+  archived
+}
+
+Enum collection_visibility {
+  private        [note: 'Solo miembros del workspace con permiso.']
+  link_public    [note: 'Enlace publico sin cuenta.']
+  link_private   [note: 'Enlace + codigo de acceso hasheado.']
+}
+
+Enum share_permission {
+  viewer          [note: 'Solo lectura.']
+  viewer_export   [note: 'Lectura y descarga/exportacion (sin secretos).']
+  executor        [note: 'Ejecucion. Desactivado por defecto; nunca concede edicion.']
+}
+
+Enum share_state {
+  active
+  expired
+  revoked
+}
+
+Enum access_attempt_result {
+  success
+  invalid_code
+  expired
+  revoked
+  rate_limited
+  locked_out
+}
+
+Enum http_method {
+  GET
+  POST
+  PUT
+  PATCH
+  DELETE
+  HEAD
+  OPTIONS
+  TRACE
+  CUSTOM [note: 'El verbo real va en api_requests.method_custom.']
+}
+
+Enum body_mode {
+  none
+  raw_json
+  raw_text
+  raw_xml
+  raw_html
+  graphql
+  form_urlencoded
+  multipart_form_data
+  binary_file
+  custom
+}
+
+Enum param_kind {
+  query
+  path
+}
+
+Enum auth_mode {
+  inherit  [note: 'Hereda del ancestro mas cercano: carpeta -> coleccion -> workspace.']
+  none     [note: 'Corta la herencia explicitamente.']
+  explicit [note: 'Usa la auth_configuration asociada.']
+}
+
+Enum auth_type {
+  none
+  basic
+  bearer
+  api_key_header
+  api_key_query
+  oauth2_client_credentials
+  oauth2_authorization_code_pkce
+  oauth2_refresh_token
+  digest
+  mtls_client_cert
+  custom
+}
+
+Enum credential_slot {
+  username
+  password
+  bearer_token
+  api_key
+  client_id
+  client_secret
+  refresh_token
+  access_token
+  private_key
+  key_passphrase
+  client_certificate
+  ca_bundle
+  cookie_value
+  totp_seed
+}
+
+Enum secret_scope {
+  user
+  workspace
+  collection
+  environment
+  api_request
+}
+
+Enum secret_state {
+  active
+  rotating
+  revoked
+}
+
+Enum environment_kind {
+  local
+  development
+  testing
+  staging
+  production
+  custom
+}
+
+Enum variable_scope {
+  global     [note: 'Instalacion completa. Solo administradores de plataforma.']
+  workspace
+  collection
+  api_request
+}
+
+Enum variable_value_kind {
+  string
+  number
+  boolean
+  json
+  file
+  secret [note: 'El valor NO esta en la fila: vive cifrado en secrets.']
+}
+
+Enum version_source {
+  manual
+  auto_snapshot
+  import
+  restore
+}
+
+Enum execution_outcome {
+  completed
+  timeout
+  cancelled
+  dns_failure
+  tls_failure
+  connection_error
+  blocked_by_policy [note: 'Rechazada por el control SSRF antes o durante la conexion.']
+  too_large
+  internal_error
+}
+
+Enum body_persistence {
+  none          [note: 'Por defecto. Solo metadatos; el cuerpo nunca toca disco.']
+  metadata_only
+  truncated     [note: 'Primeros N bytes, N configurable por workspace.']
+  full          [note: 'Requiere opt-in explicito y expires_at obligatorio.']
+}
+
+Enum storage_backend {
+  object_store
+  local_fs
+  inline_db [note: 'Solo para artefactos pequenos y truncados.']
+}
+
+Enum artifact_state {
+  stored
+  expired
+  purged
+  discarded_by_policy
+}
+
+Enum test_kind {
+  status_code
+  header_present
+  header_value
+  response_time
+  json_schema
+  required_property
+  exact_value
+  body_contains
+  expression
+  script
+  sequence
+}
+
+Enum test_result {
+  passed
+  failed
+  skipped
+  errored
+}
+
+Enum run_status {
+  queued
+  running
+  passed
+  failed
+  cancelled
+  errored
+}
+
+Enum run_trigger {
+  manual
+  scheduled
+  ci
+  shared_link
+}
+
+Enum notification_kind {
+  invitation_received
+  invitation_accepted
+  member_joined
+  comment_created
+  comment_mention
+  comment_resolved
+  collection_run_finished
+  version_restored
+  share_link_accessed
+  share_code_locked_out
+  system
+}
+
+Enum audit_target_type {
+  user
+  session
+  workspace
+  workspace_member
+  invitation
+  project
+  collection
+  collection_folder
+  api_request
+  environment
+  variable
+  secret
+  auth_configuration
+  shared_link
+  share_access_code
+  collection_version
+  test_definition
+  collection_run
+  file
+  comment
+  system
+}
+
+Enum file_purpose {
+  request_body_binary
+  form_field_file
+  client_certificate
+  ca_bundle
+  user_avatar
+  workspace_icon
+  collection_snapshot
+  response_artifact
+  import_source
+  export_bundle
+}
+
+Enum file_scan_status {
+  pending
+  clean
+  rejected
+  skipped
+  failed
+}
+
+Enum redirect_policy {
+  follow
+  follow_same_origin
+  never
+}
+
+Enum cookie_same_site {
+  strict
+  lax
+  none
+}
+
+Enum import_format {
+  postman_v2_0
+  postman_v2_1
+  openapi_3
+  swagger_2
+  curl
+  insomnia
+  har
+  ceiba_native
+}
+
+// =============================================================================
+// BLOQUE 1 - IDENTIDAD, SESIONES, WORKSPACES, MIEMBROS, INVITACIONES
+// =============================================================================
+
+Table users {
+  id uuid [pk, default: `uuidv7()`]
+  email citext [not null, note: 'citext -> unicidad case-insensitive sin indice funcional.']
+  email_verified_at timestamptz
+  password_hash text [note: 'Argon2id. NULL si la cuenta es solo SSO. Nunca se devuelve por la API.']
+  password_updated_at timestamptz
+  display_name text [not null]
+  avatar_file_id uuid
+  locale text [not null, default: 'es']
+  timezone text [not null, default: 'UTC']
+  status user_status [not null, default: 'invited']
+  mfa_enabled boolean [not null, default: false]
+  mfa_secret_id uuid [note: 'FK a secrets. El seed TOTP jamas se guarda en claro.']
+  failed_login_count integer [not null, default: 0]
+  locked_until timestamptz
+  last_login_at timestamptz
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+  deleted_at timestamptz [note: 'Borrado logico. El correo se libera al purgar, no al borrar.']
+
+  Indexes {
+    email [unique, name: 'uq_users_email']
+    (status, created_at) [name: 'ix_users_status_created']
+    deleted_at [name: 'ix_users_deleted_at']
+  }
+  Note: '''
+  CHECK ck_users_locked: locked_until IS NULL OR locked_until > created_at.
+  CHECK ck_users_pwd_or_sso: password_hash IS NOT NULL OR status <> 'active'
+    ... relajado si hay SSO; ver MODELO-DATOS.md.
+  El indice unico de email es PARCIAL en la migracion real:
+    CREATE UNIQUE INDEX uq_users_email ON users (email) WHERE deleted_at IS NULL;
+  DBML no expresa indices parciales.
+  '''
+}
+
+Table sessions {
+  id uuid [pk, default: `uuidv7()`]
+  user_id uuid [not null]
+  token_selector text [not null, note: 'Mitad publica del refresh token. Indexable, NO secreta.']
+  token_verifier_hash bytea [not null, note: 'SHA-256 de la mitad secreta. El token en claro nunca se guarda.']
+  parent_session_id uuid [note: 'Rotacion de refresh token: detecta reutilizacion de token robado.']
+  user_agent text
+  client_ip inet
+  device_label text
+  issued_at timestamptz [not null, default: `now()`]
+  last_seen_at timestamptz [not null, default: `now()`]
+  absolute_expires_at timestamptz [not null, note: 'Caducidad dura; no se extiende con el uso.']
+  idle_expires_at timestamptz [not null, note: 'Caducidad por inactividad; se desplaza al refrescar.']
+  revoked_at timestamptz
+  revoked_reason text
+
+  Indexes {
+    token_selector [unique, name: 'uq_sessions_selector']
+    (user_id, last_seen_at) [name: 'ix_sessions_user_lastseen']
+    absolute_expires_at [name: 'ix_sessions_abs_expiry']
+    parent_session_id [name: 'ix_sessions_parent']
+  }
+  Note: '''
+  Patron selector/verifier: la busqueda es O(1) por selector y la comparacion
+  del verifier es en tiempo constante. Evita escanear la tabla hasheando fila a
+  fila y evita el timing leak de comparar hashes con ==.
+  Indice parcial real: ... ON sessions (user_id) WHERE revoked_at IS NULL.
+  Purga: borrado FISICO de filas con absolute_expires_at < now() - 30 dias.
+  '''
+}
+
+Table workspaces {
+  id uuid [pk, default: `uuidv7()`]
+  slug citext [not null, note: 'Identificador estable en URL, independiente del nombre.']
+  name text [not null]
+  description text
+  icon_file_id uuid
+  icon_emoji text
+  owner_user_id uuid [not null, note: 'Denormalizado para consultas rapidas; la verdad esta en workspace_members.']
+  settings jsonb [not null, default: `'{}'::jsonb`]
+  response_body_persistence body_persistence [not null, default: 'none', note: 'Politica por defecto del workspace para cuerpos de respuesta.']
+  response_retention_days integer [not null, default: 7]
+  response_max_persist_bytes bigint [not null, default: 262144]
+  history_retention_days integer [not null, default: 90]
+  allow_public_sharing boolean [not null, default: true]
+  allow_shared_link_execution boolean [not null, default: false, note: 'Ejecucion publica desactivada por defecto (seccion 6).']
+  status lifecycle_status [not null, default: 'active']
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+  deleted_at timestamptz
+  deleted_by_user_id uuid
+
+  Indexes {
+    slug [unique, name: 'uq_workspaces_slug']
+    owner_user_id [name: 'ix_workspaces_owner']
+    (status, deleted_at) [name: 'ix_workspaces_status']
+  }
+  Note: '''
+  CHECK ck_ws_retention: response_retention_days BETWEEN 0 AND 365.
+  CHECK ck_ws_maxbytes: response_max_persist_bytes BETWEEN 0 AND 10485760.
+  Indice unico real es parcial: WHERE deleted_at IS NULL (permite reutilizar
+  un slug despues de borrar un workspace).
+  '''
+}
+
+Table workspace_members {
+  id uuid [pk, default: `uuidv7()`]
+  workspace_id uuid [not null]
+  user_id uuid [not null]
+  role workspace_role [not null, default: 'viewer']
+  status membership_status [not null, default: 'active']
+  invited_by_user_id uuid
+  joined_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+  removed_at timestamptz
+  last_active_at timestamptz
+
+  Indexes {
+    (workspace_id, user_id) [unique, name: 'uq_member_ws_user']
+    (user_id, status) [name: 'ix_member_user_status']
+    (workspace_id, role) [name: 'ix_member_ws_role']
+  }
+  Note: '''
+  Tabla de autorizacion canonica: TODA comprobacion de permiso del backend
+  resuelve contra esta fila, no contra el frontend (seccion 5).
+  CHECK ck_member_removed: (status = 'removed') = (removed_at IS NOT NULL).
+  Invariante de aplicacion + trigger: cada workspace no borrado tiene al menos
+  un miembro activo con role='owner'. No es expresable como CHECK de fila.
+  '''
+}
+
+Table invitations {
+  id uuid [pk, default: `uuidv7()`]
+  workspace_id uuid [not null]
+  email citext [not null]
+  role workspace_role [not null, default: 'viewer']
+  token_selector text [not null, note: 'Parte publica del enlace de invitacion.']
+  token_verifier_hash bytea [not null, note: 'Hash del token. Nunca el token en claro.']
+  status invitation_status [not null, default: 'pending']
+  message text
+  invited_by_user_id uuid
+  accepted_by_user_id uuid
+  expires_at timestamptz [not null]
+  accepted_at timestamptz
+  revoked_at timestamptz
+  resend_count integer [not null, default: 0]
+  last_sent_at timestamptz
+  created_at timestamptz [not null, default: `now()`]
+
+  Indexes {
+    token_selector [unique, name: 'uq_invitations_selector']
+    (workspace_id, email) [name: 'ix_invitations_ws_email']
+    (status, expires_at) [name: 'ix_invitations_status_expiry']
+  }
+  Note: '''
+  Indice unico parcial real (no expresable en DBML):
+    CREATE UNIQUE INDEX uq_invitation_pending ON invitations (workspace_id, email)
+      WHERE status = 'pending';
+  Impide dos invitaciones vivas al mismo correo en el mismo workspace, pero
+  permite reinvitar tras revocar o caducar.
+  CHECK ck_inv_accept: (status = 'accepted') = (accepted_at IS NOT NULL).
+  '''
+}
+
+// =============================================================================
+// BLOQUE 2 - ORGANIZACION: PROYECTOS, COLECCIONES, CARPETAS, SOLICITUDES
+// Nota de diseno: `collections.project_id` es NULLABLE a proposito. La seccion 4
+// del prompt maestro exige que el usuario pueda empezar con un workspace y una
+// solicitud, sin crear todos los niveles intermedios.
+// =============================================================================
+
+Table projects {
+  id uuid [pk, default: `uuidv7()`]
+  workspace_id uuid [not null]
+  slug citext [not null]
+  name text [not null]
+  description text
+  color text
+  sort_key text [not null, note: 'Rank fraccionario lexicografico. Reordenar = reescribir UNA fila.']
+  status lifecycle_status [not null, default: 'active']
+  created_by_user_id uuid
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+  deleted_at timestamptz
+  deleted_by_user_id uuid
+
+  Indexes {
+    (workspace_id, slug) [unique, name: 'uq_projects_ws_slug']
+    (workspace_id, status, sort_key) [name: 'ix_projects_ws_order']
+  }
+  Note: 'Indice unico real parcial: WHERE deleted_at IS NULL.'
+}
+
+Table collections {
+  id uuid [pk, default: `uuidv7()`]
+  workspace_id uuid [not null, note: 'Siempre presente: el workspace es la frontera de autorizacion.']
+  project_id uuid [note: 'NULL = coleccion colgada directamente del workspace.']
+  slug citext [not null]
+  name text [not null]
+  description text [note: 'Documentacion en Markdown. Metadato publicable.']
+  visibility collection_visibility [not null, default: 'private']
+  default_auth_mode auth_mode [not null, default: 'none']
+  default_auth_configuration_id uuid [note: 'Forma de la auth, NO el secreto. Ver auth_credentials.']
+  default_timeout_ms integer [not null, default: 30000]
+  default_redirect_policy redirect_policy [not null, default: 'follow']
+  default_max_redirects smallint [not null, default: 5]
+  tls_verify_peer boolean [not null, default: true]
+  variables_doc jsonb [not null, default: `'{}'::jsonb`, note: 'Solo documentacion de variables esperadas. NUNCA valores secretos.']
+  schema_format import_format [note: 'Formato de origen si vino de una importacion.']
+  source_file_id uuid [note: 'Fichero original importado, para trazabilidad.']
+  request_count integer [not null, default: 0, note: 'Contador denormalizado mantenido por trigger. Evita COUNT(*) en colecciones de miles de solicitudes.']
+  sort_key text [not null]
+  status lifecycle_status [not null, default: 'active']
+  current_version_number integer [not null, default: 0]
+  lock_version integer [not null, default: 0, note: 'Bloqueo optimista: evita sobrescrituras silenciosas (seccion 5).']
+  created_by_user_id uuid
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+  deleted_at timestamptz
+  deleted_by_user_id uuid
+
+  Indexes {
+    (workspace_id, slug) [unique, name: 'uq_collections_ws_slug']
+    (workspace_id, project_id, status, sort_key) [name: 'ix_collections_tree']
+    (visibility, status) [name: 'ix_collections_visibility']
+    name [name: 'ix_collections_name_trgm', type: gin]
+  }
+  Note: '''
+  SEPARACION METADATO/SECRETO (requisito no negociable):
+  esta tabla NO tiene ninguna columna de credencial y NO alcanza `secrets` por
+  ninguna ruta de clave foranea. El unico puente posible es
+  collections -> auth_configurations -> auth_credentials -> secrets, y
+  `auth_credentials` es precisamente la arista que el serializador de
+  publicacion y exportacion tiene PROHIBIDO recorrer.
+  `ix_collections_name_trgm` requiere la extension pg_trgm y en la migracion
+  real es: USING gin (name gin_trgm_ops).
+  '''
+}
+
+Table collection_folders {
+  id uuid [pk, default: `uuidv7()`]
+  collection_id uuid [not null]
+  parent_folder_id uuid [note: 'NULL = carpeta raiz de la coleccion. Autorreferencia -> profundidad arbitraria.']
+  name text [not null]
+  description text
+  materialized_path text [not null, note: 'Ruta denormalizada de ids, p.ej. /<uuid>/<uuid>/. Permite subarbol en UNA consulta por prefijo.']
+  depth smallint [not null, default: 0, note: 'Profundidad derivada. CHECK <= 32 para acotar la recursion.']
+  auth_mode auth_mode [not null, default: 'inherit']
+  auth_configuration_id uuid
+  sort_key text [not null]
+  lock_version integer [not null, default: 0]
+  created_by_user_id uuid
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+  deleted_at timestamptz
+  deleted_by_user_id uuid
+
+  Indexes {
+    (collection_id, parent_folder_id, sort_key) [name: 'ix_folders_siblings']
+    (collection_id, parent_folder_id, name) [unique, name: 'uq_folder_sibling_name']
+    materialized_path [name: 'ix_folders_path', type: btree]
+    collection_id [name: 'ix_folders_collection']
+  }
+  Note: '''
+  JERARQUIA DE PROFUNDIDAD ARBITRARIA: `parent_folder_id` es la verdad;
+  `materialized_path` y `depth` son derivados mantenidos por trigger.
+  Es una desnormalizacion deliberada y acotada, justificada en MODELO-DATOS.md:
+  sin ella, pintar el arbol de una coleccion de miles de nodos exige un
+  WITH RECURSIVE por expansion.
+  Consulta de subarbol: WHERE materialized_path LIKE :prefijo || %
+    -> usa ix_folders_path con text_pattern_ops en la migracion real.
+  CHECK ck_folder_depth: depth >= 0 AND depth <= 32.
+  CHECK ck_folder_not_self: id <> parent_folder_id.
+  Trigger anti-ciclo: un movimiento no puede colocar una carpeta dentro de su
+  propio subarbol (comprobacion por prefijo de materialized_path).
+  El unico indice que necesita ser parcial es uq_folder_sibling_name:
+    WHERE deleted_at IS NULL.
+  '''
+}
+
+Table api_requests {
+  id uuid [pk, default: `uuidv7()`, note: 'IDENTIFICADOR ESTABLE DEL ENDPOINT. Inmutable, independiente del nombre, sobrevive a renombrados, movimientos entre carpetas y restauraciones de version (seccion 11).']
+  collection_id uuid [not null]
+  folder_id uuid [note: 'NULL = solicitud en la raiz de la coleccion.']
+  external_ref text [note: 'Id del sistema de origen (Postman, OpenAPI operationId) para reimportar sin duplicar.']
+  name text [not null]
+  description text
+  method http_method [not null, default: 'GET']
+  method_custom text [note: 'Verbo real cuando method = CUSTOM.']
+  url_template text [not null, note: 'URL con marcadores {{var}} sin resolver. Jamas se guarda resuelta.']
+  body_mode body_mode [not null, default: 'none']
+  auth_mode auth_mode [not null, default: 'inherit']
+  auth_configuration_id uuid
+  timeout_ms integer [note: 'NULL = hereda de la coleccion.']
+  redirect_policy redirect_policy
+  max_redirects smallint
+  tls_verify_peer boolean
+  client_certificate_id uuid
+  pre_request_script text [note: 'Se ejecuta en sandbox aislado. El modelo solo lo almacena.']
+  post_response_script text
+  settings jsonb [not null, default: `'{}'::jsonb`]
+  sort_key text [not null]
+  lock_version integer [not null, default: 0]
+  last_executed_at timestamptz
+  created_by_user_id uuid
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+  deleted_at timestamptz
+  deleted_by_user_id uuid
+
+  Indexes {
+    (collection_id, folder_id, sort_key) [name: 'ix_requests_siblings']
+    (collection_id, deleted_at) [name: 'ix_requests_collection_live']
+    (collection_id, external_ref) [unique, name: 'uq_requests_external_ref']
+    (collection_id, method) [name: 'ix_requests_method']
+    name [name: 'ix_requests_name_trgm', type: gin]
+    url_template [name: 'ix_requests_url_trgm', type: gin]
+  }
+  Note: '''
+  ESCALA: esta es la tabla que crece a miles de filas por coleccion. Por eso:
+   - El cuerpo vive en `request_bodies` (1:1). Listar el arbol no arrastra
+     payloads grandes ni paga el coste de TOAST.
+   - `ix_requests_siblings` sirve la paginacion por teclado (keyset) del arbol:
+     WHERE collection_id = ? AND folder_id IS NOT DISTINCT FROM ? AND sort_key > ?
+     ORDER BY sort_key LIMIT 100.
+   - Los indices trigram cubren la busqueda por nombre y por URL (seccion 11).
+  CHECK ck_request_custom_verb:
+    (method = 'CUSTOM') = (method_custom IS NOT NULL).
+  CHECK ck_request_timeout: timeout_ms IS NULL OR timeout_ms BETWEEN 1 AND 600000.
+  uq_requests_external_ref es parcial: WHERE external_ref IS NOT NULL
+    AND deleted_at IS NULL.
+  '''
+}
+
+Table request_headers {
+  id uuid [pk, default: `uuidv7()`]
+  api_request_id uuid [not null]
+  name text [not null, note: 'Nombre de cabecera. Comparacion case-insensitive por RFC 9110.']
+  value text [note: 'NULL cuando is_secret = true: el valor vive cifrado en secrets.']
+  secret_id uuid [note: 'Obligatorio si is_secret = true.']
+  description text
+  is_secret boolean [not null, default: false]
+  is_enabled boolean [not null, default: true]
+  sort_order integer [not null, default: 0]
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+
+  Indexes {
+    (api_request_id, sort_order) [name: 'ix_headers_request_order']
+    (api_request_id, name) [name: 'ix_headers_request_name']
+    secret_id [name: 'ix_headers_secret']
+  }
+  Note: '''
+  CHECK ck_header_secret_xor:
+    (is_secret AND value IS NULL AND secret_id IS NOT NULL)
+    OR (NOT is_secret AND secret_id IS NULL)
+  Garantiza que una cabecera marcada como secreta NO puede tener texto en claro
+  en la fila. Es el control que impide que un Authorization: Bearer ... acabe en
+  un export o en un snapshot de version.
+  Borrado FISICO en cascada con la solicitud: es detalle dependiente, no tiene
+  vida propia ni necesita recuperacion independiente.
+  '''
+}
+
+Table request_params {
+  id uuid [pk, default: `uuidv7()`]
+  api_request_id uuid [not null]
+  kind param_kind [not null, default: 'query']
+  name text [not null]
+  value text [note: 'NULL cuando is_secret = true.']
+  secret_id uuid
+  description text
+  is_secret boolean [not null, default: false]
+  is_enabled boolean [not null, default: true]
+  sort_order integer [not null, default: 0]
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+
+  Indexes {
+    (api_request_id, kind, sort_order) [name: 'ix_params_request_order']
+    secret_id [name: 'ix_params_secret']
+  }
+  Note: '''
+  Separada de request_headers a proposito: un parametro de ruta (kind='path')
+  y una cabecera tienen reglas de resolucion, codificacion y unicidad distintas.
+  Fundirlas en una tabla generica obligaria a un CHECK condicional por tipo.
+  CHECK ck_param_secret_xor: mismo invariante que en request_headers.
+  CHECK ck_param_path_enabled: kind <> 'path' OR is_enabled = true
+    (un parametro de ruta no se puede desactivar sin romper la URL).
+  '''
+}
+
+Table request_bodies {
+  id uuid [pk, default: `uuidv7()`]
+  api_request_id uuid [not null, unique, note: 'Relacion 1:1 estricta.']
+  mode body_mode [not null, default: 'none']
+  content_type text [note: 'Sobrescribe el content-type derivado del modo.']
+  raw_content text [note: 'Solo para modos raw_*/graphql. Puede ser grande -> TOAST.']
+  graphql_variables jsonb
+  binary_file_id uuid [note: 'Solo para mode = binary_file.']
+  charset text [not null, default: 'utf-8']
+  size_bytes bigint [not null, default: 0]
+  checksum_sha256 bytea
+  updated_at timestamptz [not null, default: `now()`]
+
+  Indexes {
+    api_request_id [unique, name: 'uq_bodies_request']
+    binary_file_id [name: 'ix_bodies_file']
+  }
+  Note: '''
+  Tabla separada de api_requests por rendimiento, no por teoria: mantiene las
+  filas de api_requests estrechas para que el listado del arbol de una coleccion
+  de miles de solicitudes no toque paginas con payloads de cientos de KB.
+  CHECK ck_body_mode_shape:
+    (mode IN ('raw_json','raw_text','raw_xml','raw_html','graphql')
+       AND binary_file_id IS NULL)
+    OR (mode = 'binary_file' AND raw_content IS NULL AND binary_file_id IS NOT NULL)
+    OR (mode IN ('none','form_urlencoded','multipart_form_data','custom')
+       AND raw_content IS NULL AND binary_file_id IS NULL)
+  Los campos de formulario NO van aqui: van en request_body_fields, porque son
+  una lista ordenada con secretos y ficheros por fila.
+  '''
+}
+
+Table request_body_fields {
+  id uuid [pk, default: `uuidv7()`]
+  request_body_id uuid [not null]
+  field_name text [not null]
+  field_value text [note: 'NULL si is_secret o si es un campo de tipo fichero.']
+  secret_id uuid
+  file_id uuid [note: 'Solo en multipart_form_data.']
+  content_type text
+  is_secret boolean [not null, default: false]
+  is_enabled boolean [not null, default: true]
+  sort_order integer [not null, default: 0]
+
+  Indexes {
+    (request_body_id, sort_order) [name: 'ix_bodyfields_order']
+    secret_id [name: 'ix_bodyfields_secret']
+    file_id [name: 'ix_bodyfields_file']
+  }
+  Note: '''
+  Normaliza los campos de application/x-www-form-urlencoded y multipart/form-data
+  (seccion 7). Guardarlos como jsonb impediria tanto el FK a `files` como el FK a
+  `secrets`, y con ello la separacion metadato/secreto en subidas de ficheros.
+  CHECK ck_bodyfield_xor: como maximo uno de (field_value, secret_id, file_id)
+  no nulo, y secret_id NOT NULL si is_secret.
+  '''
+}
+
+Table tags {
+  id uuid [pk, default: `uuidv7()`]
+  workspace_id uuid [not null]
+  name citext [not null]
+  color text
+  created_at timestamptz [not null, default: `now()`]
+
+  Indexes {
+    (workspace_id, name) [unique, name: 'uq_tags_ws_name']
+  }
+  Note: 'Etiquetas de la seccion 11, con alcance de workspace.'
+}
+
+Table request_tags {
+  api_request_id uuid [not null]
+  tag_id uuid [not null]
+  tagged_at timestamptz [not null, default: `now()`]
+  tagged_by_user_id uuid
+
+  Indexes {
+    (api_request_id, tag_id) [pk, name: 'pk_request_tags']
+    tag_id [name: 'ix_request_tags_tag']
+  }
+  Note: 'Tabla puente N:M con PK compuesta. Borrado fisico en cascada por ambos lados.'
+}
+
+// =============================================================================
+// BLOQUE 3 - BOVEDA DE SECRETOS Y AUTENTICACION
+// Este bloque implementa el requisito no negociable de SEPARAR los metadatos de
+// la coleccion de los secretos de autenticacion. `secrets` es un subgrafo
+// aparte: ninguna fila de `collections`, `collection_folders` o `api_requests`
+// contiene material criptografico, solo referencias que el exportador no sigue.
+// =============================================================================
+
+Table secrets {
+  id uuid [pk, default: `uuidv7()`]
+  workspace_id uuid [not null, note: 'Frontera de autorizacion y de clave de cifrado.']
+  scope secret_scope [not null]
+  scope_id uuid [note: 'Id del recurso dueno dentro del scope. Sin FK: es polimorfico a proposito, ver nota.']
+  label text [not null, note: 'Nombre legible NO sensible, p.ej. token de staging. Es lo unico que la API devuelve.']
+  ciphertext bytea [not null, note: 'AEAD (AES-256-GCM o XChaCha20-Poly1305). NUNCA texto en claro.']
+  nonce bytea [not null]
+  auth_tag bytea [note: 'Separado si la libreria no lo concatena al ciphertext.']
+  aad_fingerprint bytea [not null, note: 'Hash de los datos asociados (workspace_id|scope|scope_id|slot). Ata el criptograma a su contexto: un secreto movido a otra coleccion no descifra.']
+  kek_reference text [not null, note: 'Identificador de la clave maestra en KMS / Secret Manager. Es un PUNTERO: la clave vive FUERA de la base de datos.']
+  dek_wrapped bytea [note: 'DEK envuelta por la KEK (envelope encryption). NULL si se cifra directo con la KEK.']
+  algorithm text [not null, default: 'AES-256-GCM']
+  key_version integer [not null, default: 1]
+  state secret_state [not null, default: 'active']
+  last_used_at timestamptz
+  rotated_at timestamptz
+  rotated_from_secret_id uuid
+  expires_at timestamptz [note: 'Obligatorio para tokens OAuth cacheados.']
+  revoked_at timestamptz
+  created_by_user_id uuid
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+
+  Indexes {
+    (workspace_id, scope, scope_id) [name: 'ix_secrets_scope']
+    (state, expires_at) [name: 'ix_secrets_expiry']
+    kek_reference [name: 'ix_secrets_kek']
+    rotated_from_secret_id [name: 'ix_secrets_rotation_chain']
+  }
+  Note: '''
+  BOVEDA. Reglas que el esquema impone y las que no puede imponer:
+
+  Impone el esquema:
+   - No existe columna de valor en claro. Es imposible guardar un secreto
+     plano sin una migracion que anada una columna nueva, y eso se ve en
+     revision de codigo.
+   - `aad_fingerprint` ata el criptograma a su contexto. Copiar la fila a otra
+     coleccion produce un fallo de descifrado, no una fuga silenciosa.
+   - La clave maestra NO esta en la base de datos: `kek_reference` es un
+     puntero a KMS. Un volcado completo de PostgreSQL no basta para descifrar.
+
+  No lo impone el esquema (es responsabilidad de la aplicacion, y lo digo
+  explicitamente en lugar de fingir que el modelo lo resuelve):
+   - Que nadie haga SELECT ciphertext y lo saque por la API.
+   - El control de acceso por rol al descifrado.
+
+  `scope_id` no lleva FK porque apunta a cinco tablas distintas segun `scope`.
+  Alternativa descartada: cinco columnas nullables con CHECK. La descarto
+  porque la boveda debe poder sobrevivir al borrado del recurso que la uso
+  (para auditoria de rotacion), y un FK con CASCADE borraria evidencia.
+  La integridad se vigila con un job de reconciliacion, documentado en
+  MODELO-DATOS.md.
+
+  CHECK ck_secret_revoked: (state = 'revoked') = (revoked_at IS NOT NULL).
+  CHECK ck_secret_notself: id <> rotated_from_secret_id.
+  '''
+}
+
+Table auth_configurations {
+  id uuid [pk, default: `uuidv7()`]
+  workspace_id uuid [not null]
+  name text [not null]
+  auth_type auth_type [not null, default: 'none']
+  // --- Campos NO secretos. Todo lo sensible esta en auth_credentials. ---
+  api_key_param_name text [note: 'Nombre de la cabecera o del query param. No es secreto; el valor si.']
+  bearer_prefix text [not null, default: 'Bearer']
+  oauth_authorization_url text
+  oauth_token_url text
+  oauth_refresh_url text
+  oauth_redirect_uri text
+  oauth_scopes text [note: 'Lista separada por espacios. Metadato publico del flujo.']
+  oauth_audience text
+  oauth_use_pkce boolean [not null, default: true]
+  oauth_pkce_method text [not null, default: 'S256']
+  oauth_client_auth_method text [not null, default: 'client_secret_post']
+  digest_algorithm text
+  digest_qop text
+  mtls_verify_peer boolean [not null, default: true]
+  custom_scheme text [note: 'Para auth_type = custom.']
+  extra_params jsonb [not null, default: `'{}'::jsonb`, note: 'PROHIBIDO guardar secretos aqui. Validado en aplicacion contra una lista blanca de claves.']
+  created_by_user_id uuid
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+  deleted_at timestamptz
+
+  Indexes {
+    (workspace_id, name) [name: 'ix_authcfg_ws_name']
+    auth_type [name: 'ix_authcfg_type']
+  }
+  Note: '''
+  LA MITAD PUBLICABLE DE LA AUTENTICACION. Contiene la FORMA del mecanismo
+  (que flujo, contra que URL, con que nombre de cabecera) y nunca el material.
+  Un export de coleccion PUEDE incluir estas filas sin filtrar nada: decirle a
+  alguien que una API usa OAuth2 con PKCE contra https://auth.ejemplo/token no
+  es una credencial.
+  CHECK ck_authcfg_apikey: auth_type NOT IN ('api_key_header','api_key_query')
+    OR api_key_param_name IS NOT NULL.
+  CHECK ck_authcfg_oauth: auth_type NOT LIKE 'oauth2%' OR oauth_token_url IS NOT NULL.
+  '''
+}
+
+Table auth_credentials {
+  id uuid [pk, default: `uuidv7()`]
+  auth_configuration_id uuid [not null]
+  slot credential_slot [not null, note: 'Que pieza del mecanismo es: password, client_secret, access_token...']
+  secret_id uuid [not null]
+  owner_user_id uuid [note: 'NULL = credencial compartida del workspace. No NULL = credencial personal, invisible para los demas miembros.']
+  is_shareable boolean [not null, default: false, note: 'Si false, ni siquiera un export autorizado del workspace la incluye.']
+  expires_at timestamptz
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+
+  Indexes {
+    (auth_configuration_id, slot, owner_user_id) [unique, name: 'uq_authcred_slot_owner']
+    secret_id [name: 'ix_authcred_secret']
+    owner_user_id [name: 'ix_authcred_owner']
+  }
+  Note: '''
+  UNICO CAMINO ENTRE auth_configurations Y secrets.
+
+  Precision importante, para no afirmar de mas: esta NO es la unica arista de
+  todo el esquema hacia `secrets`. Hay 12 claves foraneas que apuntan a
+  `secrets` (request_headers, request_params, request_body_fields,
+  scoped_variables, environment_variables, variable_local_values,
+  cookie_jar_entries, client_certificates x2, users.mfa_secret_id, la cadena de
+  rotacion y esta). Lo que SI es cierto y es lo que exige el requisito:
+
+   a) Ninguna fila de metadatos contiene material criptografico. Como maximo
+      contiene un `secret_id`, y cuando lo contiene el CHECK correspondiente
+      obliga a que la columna de texto en claro sea NULL.
+   b) El unico camino desde `auth_configurations` (la forma publicable de la
+      autenticacion) hasta el material es ESTA tabla.
+   c) El conjunto de aristas hacia la boveda es cerrado, enumerable y todas sus
+      columnas se llaman *secret_id. Eso convierte la regla de exportacion en
+      algo mecanicamente comprobable:
+      NINGUN serializador sigue una FK cuyo destino sea `secrets`.
+
+  Contrato de publicacion y exportacion, verificable con una prueba:
+  el serializador recorre collections, collection_folders, api_requests,
+  request_headers, request_params, request_bodies, request_body_fields y
+  auth_configurations, emite los `secret_id` como referencias opacas o los
+  omite, y NUNCA hace JOIN con `secrets` ni con esta tabla.
+  (test obligatorio 18, seccion 20: los secretos no se filtran en exportaciones)
+
+  Si la credencial estuviera como columna en `collections` o dentro de un jsonb,
+  no habria nada que aislar ni nada que probar.
+
+  `owner_user_id` resuelve el caso de la seccion 6: publicar una coleccion no
+  puede arrastrar las credenciales PERSONALES del propietario.
+  '''
+}
+
+Table client_certificates {
+  id uuid [pk, default: `uuidv7()`]
+  workspace_id uuid [not null]
+  name text [not null]
+  host_pattern text [not null, note: 'Host o patron al que aplica el certificado.']
+  port integer
+  certificate_file_id uuid [not null]
+  private_key_secret_id uuid [not null, note: 'La clave privada va a la boveda, nunca a `files` en claro.']
+  passphrase_secret_id uuid
+  ca_bundle_file_id uuid
+  not_before timestamptz
+  not_after timestamptz
+  fingerprint_sha256 bytea
+  created_by_user_id uuid
+  created_at timestamptz [not null, default: `now()`]
+  deleted_at timestamptz
+
+  Indexes {
+    (workspace_id, host_pattern) [name: 'ix_clientcert_ws_host']
+    not_after [name: 'ix_clientcert_expiry']
+  }
+  Note: 'mTLS de la seccion 7. El certificado publico puede ir en `files`; la clave privada NO, va cifrada en `secrets`.'
+}
+
+Table cookie_jar_entries {
+  id uuid [pk, default: `uuidv7()`]
+  workspace_id uuid [not null]
+  environment_id uuid [note: 'Tarro de cookies por entorno. NULL = tarro del workspace.']
+  owner_user_id uuid [note: 'NULL = cookie compartida. No NULL = cookie personal, nunca se comparte ni se exporta.']
+  domain text [not null]
+  path text [not null, default: '/']
+  name text [not null]
+  value_secret_id uuid [not null, note: 'El VALOR de la cookie es un secreto: va cifrado en la boveda.']
+  is_http_only boolean [not null, default: false]
+  is_secure boolean [not null, default: true]
+  same_site cookie_same_site [not null, default: 'lax']
+  expires_at timestamptz
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+
+  Indexes {
+    (workspace_id, environment_id, domain, path, name, owner_user_id) [unique, name: 'uq_cookie_identity']
+    expires_at [name: 'ix_cookie_expiry']
+  }
+  Note: '''
+  El brief nombra las cookies explicitamente junto a credenciales y tokens como
+  algo que publicar una coleccion NO puede arrastrar. Por eso el valor no esta
+  en esta fila: esta en `secrets`, al otro lado de la frontera, y esta tabla
+  cuelga del WORKSPACE o del ENTORNO, nunca de la coleccion. Publicar una
+  coleccion no tiene ninguna ruta de FK que llegue hasta aqui.
+  Purga: borrado fisico de filas con expires_at < now().
+  '''
+}
+
+// =============================================================================
+// BLOQUE 4 - ENTORNOS Y VARIABLES
+// Precedencia (seccion 12), de menor a mayor prioridad:
+//   global -> workspace -> coleccion -> entorno -> solicitud -> ejecucion
+// Persistencia: los cuatro primeros niveles en `scoped_variables`
+// (global/workspace/collection/api_request) y `environment_variables`.
+// El nivel "ejecucion" es EFIMERO por diseno: vive en el payload de la
+// ejecucion y se registra, si acaso, en collection_runs.variable_overrides.
+// =============================================================================
+
+Table environments {
+  id uuid [pk, default: `uuidv7()`]
+  workspace_id uuid [not null]
+  collection_id uuid [note: 'NULL = entorno del workspace, visible por todas sus colecciones.']
+  name text [not null]
+  kind environment_kind [not null, default: 'custom']
+  description text
+  color text
+  is_default boolean [not null, default: false]
+  is_shared boolean [not null, default: true, note: 'false = entorno personal; no se comparte con el workspace ni se exporta.']
+  owner_user_id uuid [note: 'Obligatorio si is_shared = false.']
+  sort_key text [not null]
+  lock_version integer [not null, default: 0]
+  created_by_user_id uuid
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+  deleted_at timestamptz
+  deleted_by_user_id uuid
+
+  Indexes {
+    (workspace_id, collection_id, name) [unique, name: 'uq_env_scope_name']
+    (workspace_id, is_shared) [name: 'ix_env_ws_shared']
+    owner_user_id [name: 'ix_env_owner']
+  }
+  Note: '''
+  CHECK ck_env_owner: is_shared = true OR owner_user_id IS NOT NULL.
+  Indice unico parcial real: WHERE deleted_at IS NULL.
+  Un solo entorno por defecto por alcance: indice unico parcial
+    ON environments (workspace_id, collection_id) WHERE is_default AND deleted_at IS NULL.
+  Publicar una coleccion NO publica sus entornos (seccion 6): no existe FK de
+  shared_links a environments, y el exportador no los recorre salvo peticion
+  explicita de un miembro autorizado y con los secretos ya excluidos.
+  '''
+}
+
+Table environment_variables {
+  id uuid [pk, default: `uuidv7()`]
+  environment_id uuid [not null]
+  key text [not null, note: 'Nombre sin llaves. {{base_url}} se guarda como base_url.']
+  value_kind variable_value_kind [not null, default: 'string']
+  initial_value text [note: 'Valor compartido, el que viaja en un export autorizado. NULL si es secreto.']
+  current_value text [note: 'Valor efectivo compartido. NULL si es secreto.']
+  secret_id uuid [note: 'Obligatorio si value_kind = secret. El valor jamas esta en esta fila.']
+  description text
+  is_enabled boolean [not null, default: true]
+  sort_order integer [not null, default: 0]
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+
+  Indexes {
+    (environment_id, key) [unique, name: 'uq_envvar_env_key']
+    (environment_id, sort_order) [name: 'ix_envvar_order']
+    secret_id [name: 'ix_envvar_secret']
+  }
+  Note: '''
+  Modela los tres valores que pide la seccion 12:
+   - initial_value: valor compartido, el que se exporta.
+   - current_value: valor efectivo del equipo.
+   - valor local por usuario: NO esta aqui, esta en
+     variable_local_values, porque es por (variable, usuario).
+
+  CHECK ck_envvar_secret_xor:
+    (value_kind = 'secret' AND initial_value IS NULL AND current_value IS NULL
+       AND secret_id IS NOT NULL)
+    OR (value_kind <> 'secret' AND secret_id IS NULL)
+  Este es el control que hace cierta la frase los valores secretos no se hacen
+  publicos automaticamente al compartir o exportar: no es una regla del
+  serializador, es que la columna de texto esta vacia por restriccion.
+  '''
+}
+
+Table variable_local_values {
+  id uuid [pk, default: `uuidv7()`]
+  environment_variable_id uuid [note: 'Override de una variable de entorno. Excluyente con scoped_variable_id.']
+  scoped_variable_id uuid [note: 'Override de una variable global/workspace/coleccion/solicitud. Excluyente con environment_variable_id.']
+  user_id uuid [not null]
+  local_value text [note: 'Valor LOCAL del usuario. Nunca se comparte, ni se sincroniza, ni se exporta.']
+  secret_id uuid [note: 'Si el valor local es secreto.']
+  is_enabled boolean [not null, default: true]
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+
+  Indexes {
+    (environment_variable_id, user_id) [unique, name: 'uq_varlocal_envvar_user']
+    (scoped_variable_id, user_id) [unique, name: 'uq_varlocal_scopedvar_user']
+    user_id [name: 'ix_varlocal_user']
+    secret_id [name: 'ix_varlocal_secret']
+  }
+  Note: '''
+  Valores LOCALES de la seccion 12, para CUALQUIER ambito.
+
+  Correccion respecto a mi primer borrador: inicialmente modele el valor local
+  solo para variables de entorno. Al contrastar con el ADR-0006 del arquitecto
+  (que es el contrato normativo de precedencia segun el BRIEF 4.A.6) quedo claro
+  que el par initialValue/localValue existe en TODOS los ambitos, no solo en el
+  entorno. Esta tabla lo generaliza con dos FK excluyentes en vez de duplicar
+  una tabla de overrides por cada tabla de variables.
+
+  Regla de resolucion (ADR-0006), en dos pasos y en este orden:
+   1. Elegir el AMBITO ganador: el de mayor prioridad que defina la clave y la
+      tenga habilitada.
+   2. DENTRO de ese ambito, el valor local del usuario gana al compartido.
+  El paso 2 NUNCA hace que un ambito pierda frente a otro: un valor local en
+  workspace no gana a un valor compartido en el entorno activo.
+
+  Tabla aparte y no columna porque la cardinalidad es N usuarios x 1 variable.
+  Borrado fisico en cascada: no tiene valor historico.
+  CHECK ck_varlocal_target: exactamente una de
+    (environment_variable_id, scoped_variable_id) no nula.
+  '''
+}
+
+Table scoped_variables {
+  id uuid [pk, default: `uuidv7()`]
+  scope variable_scope [not null, note: 'global | workspace | collection | api_request.']
+  workspace_id uuid [note: 'NULL solo cuando scope = global.']
+  collection_id uuid
+  api_request_id uuid
+  key text [not null]
+  value_kind variable_value_kind [not null, default: 'string']
+  value text [note: 'NULL si value_kind = secret.']
+  secret_id uuid
+  description text
+  is_enabled boolean [not null, default: true]
+  sort_order integer [not null, default: 0]
+  created_by_user_id uuid
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+
+  Indexes {
+    (scope, workspace_id, collection_id, api_request_id, key) [unique, name: 'uq_scopedvar_identity']
+    (workspace_id, scope) [name: 'ix_scopedvar_ws_scope']
+    collection_id [name: 'ix_scopedvar_collection']
+    api_request_id [name: 'ix_scopedvar_request']
+    secret_id [name: 'ix_scopedvar_secret']
+  }
+  Note: '''
+  Cuatro de los seis niveles de la seccion 12 en una tabla con discriminador,
+  en lugar de cuatro tablas casi identicas. Lo justifico asi: el resolvedor de
+  variables necesita, para una solicitud dada, TODOS los niveles ordenados por
+  precedencia en una sola consulta. Con cuatro tablas eso es un UNION ALL de
+  cuatro ramas en cada ejecucion; con una tabla es un unico indice.
+
+  `environment_variables` SI es tabla aparte, y no es incoherencia: el nivel
+  entorno tiene un ciclo de vida distinto (initial vs current vs local por
+  usuario, pertenencia a un entorno conmutable). Meterlo aqui obligaria a
+  dejar tres columnas nulas en los otros tres niveles.
+
+  CHECK ck_scopedvar_shape (exactamente un ancla segun el scope):
+    (scope='global'      AND workspace_id IS NULL AND collection_id IS NULL AND api_request_id IS NULL)
+ OR (scope='workspace'   AND workspace_id IS NOT NULL AND collection_id IS NULL AND api_request_id IS NULL)
+ OR (scope='collection'  AND workspace_id IS NOT NULL AND collection_id IS NOT NULL AND api_request_id IS NULL)
+ OR (scope='api_request' AND workspace_id IS NOT NULL AND api_request_id IS NOT NULL)
+  CHECK ck_scopedvar_secret_xor: igual que en environment_variables.
+  El indice unico necesita NULLS NOT DISTINCT (PostgreSQL 15+) para que dos
+  globales con la misma clave colisionen de verdad.
+  '''
+}
+
+// =============================================================================
+// BLOQUE 5 - COMPARTICION PUBLICA Y PRIVADA CON CODIGO
+// Requisito no negociable: el codigo de acceso se guarda HASHEADO.
+// En todo este bloque no existe ni una sola columna que pueda contener el
+// codigo en claro. Las unicas columnas de codigo son `code_selector`
+// (aleatorio, NO secreto, solo para localizar la fila) y `code_verifier_hash`
+// (Argon2id). La comprobacion mecanica por grep esta en MODELO-DATOS.md,
+// seccion Validacion, y no se escribe aqui para que el patron de busqueda no
+// se encuentre a si mismo dentro de este fichero.
+// =============================================================================
+
+Table shared_links {
+  id uuid [pk, default: `uuidv7()`]
+  collection_id uuid [not null]
+  workspace_id uuid [not null, note: 'Denormalizado para poder revocar todos los enlaces de un workspace sin JOIN.']
+  public_slug text [not null, note: 'Parte visible de la URL. Aleatorio (>=128 bits), NO derivado del nombre ni del id interno. Por si solo NO revela el contenido privado.']
+  requires_access_code boolean [not null, default: false, note: 'true = coleccion privada con codigo (seccion 6).']
+  permission share_permission [not null, default: 'viewer']
+  allow_execution boolean [not null, default: false, note: 'Desactivado por defecto. Solo tiene efecto si permission = executor Y el workspace lo permite.']
+  allow_export boolean [not null, default: false]
+  include_examples boolean [not null, default: true]
+  state share_state [not null, default: 'active']
+  expires_at timestamptz
+  revoked_at timestamptz
+  revoked_by_user_id uuid
+  max_views integer [note: 'NULL = sin limite.']
+  view_count bigint [not null, default: 0]
+  last_accessed_at timestamptz
+  created_by_user_id uuid [not null]
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+
+  Indexes {
+    public_slug [unique, name: 'uq_sharedlink_slug']
+    (collection_id, state) [name: 'ix_sharedlink_collection']
+    (workspace_id, state) [name: 'ix_sharedlink_workspace']
+    (state, expires_at) [name: 'ix_sharedlink_expiry']
+  }
+  Note: '''
+  CHECK ck_share_no_edit: la enumeracion share_permission no contiene ningun
+  valor de edicion. Es imposible conceder escritura por enlace porque el tipo
+  no lo permite (seccion 6: nunca concedas permisos de edicion mediante un
+  enlace publico o codigo compartido).
+  CHECK ck_share_exec: allow_execution = false OR permission = 'executor'.
+  CHECK ck_share_revoked: (state = 'revoked') = (revoked_at IS NOT NULL).
+
+  REVOCACION INMEDIATA: la autorizacion de cada peticion se resuelve leyendo
+  `state`, `expires_at` y `revoked_at` de esta fila. No hay token firmado con
+  la decision dentro, asi que no existe ventana en la que un JWT ya emitido
+  siga valiendo despues de revocar. Es la razon de no usar JWT aqui.
+
+  Un enlace NO alcanza `secrets` ni `environments` por ninguna ruta de FK.
+  '''
+}
+
+Table share_access_codes {
+  id uuid [pk, default: `uuidv7()`]
+  shared_link_id uuid [not null]
+  code_selector text [not null, note: 'Parte NO secreta del codigo, para localizar la fila sin escanear. Aleatoria.']
+  code_verifier_hash bytea [not null, note: 'HASH del codigo. Argon2id (o bcrypt). EL CODIGO EN CLARO NO SE GUARDA EN NINGUNA PARTE.']
+  hash_algorithm text [not null, default: 'argon2id']
+  hash_params jsonb [not null, default: `'{}'::jsonb`, note: 'Coste de memoria, iteraciones y paralelismo, para poder rehashear al subir el coste sin invalidar codigos.']
+  code_hint text [note: 'Como maximo los 4 ultimos caracteres, solo para que el propietario distinga entre varios codigos en la interfaz. Opcional y desactivable.']
+  label text
+  state share_state [not null, default: 'active']
+  max_attempts integer [not null, default: 10]
+  failed_attempt_count integer [not null, default: 0]
+  locked_until timestamptz [note: 'Bloqueo temporal tras superar max_attempts.']
+  max_uses integer
+  use_count bigint [not null, default: 0]
+  expires_at timestamptz
+  revoked_at timestamptz
+  revoked_by_user_id uuid
+  rotated_from_code_id uuid [note: 'Cadena de rotacion: rotar genera fila nueva y revoca la anterior.']
+  created_by_user_id uuid [not null]
+  created_at timestamptz [not null, default: `now()`]
+  last_used_at timestamptz
+
+  Indexes {
+    code_selector [unique, name: 'uq_sharecode_selector']
+    (shared_link_id, state) [name: 'ix_sharecode_link_state']
+    (state, expires_at) [name: 'ix_sharecode_expiry']
+    rotated_from_code_id [name: 'ix_sharecode_rotation']
+  }
+  Note: '''
+  REQUISITO NO NEGOCIABLE, IMPLEMENTADO AQUI.
+
+  No hay columna de codigo en claro. El codigo se entrega una sola vez, en el
+  momento de generarlo, y despues solo existe como `code_verifier_hash`.
+
+  Por que selector + verifier y no un unico hash:
+  con un unico hash de Argon2id la validacion exigiria recorrer los codigos
+  vivos y hashear contra cada uno (Argon2 no permite buscar por igualdad). Eso
+  es O(n) por intento y convierte el login compartido en un amplificador de
+  DoS. Con selector la busqueda es un indice unico y solo se hashea UNA vez.
+  El selector no es secreto y no sirve para entrar.
+
+  Como se cumple el resto de la seccion 6:
+   - Generacion criptografica: responsabilidad del backend (CSPRNG). El modelo
+     no puede imponerla; lo digo en lugar de aparentar que si.
+   - Limite de intentos: `max_attempts` + `failed_attempt_count` + `locked_until`.
+   - Rate limiting: `share_access_attempts` da la ventana deslizante por IP.
+   - Mensajes que no revelan si un codigo existe: la API devuelve la MISMA
+     respuesta para selector inexistente, hash que no casa, caducado y
+     revocado. El esquema lo facilita guardando el motivo real solo en
+     `share_access_attempts.result`, no en la respuesta.
+   - Revocacion y expiracion efectivas: `state`, `revoked_at`, `expires_at`,
+     evaluados en cada peticion.
+   - Rotar y regenerar: `rotated_from_code_id`.
+   - Nunca en logs ni en URLs: el codigo viaja en el CUERPO de un POST. En la
+     URL solo va `shared_links.public_slug`, que no es el codigo.
+   - No concede acceso al workspace: esta tabla cuelga de `shared_links`, que
+     cuelga de UNA coleccion. No hay ninguna FK desde aqui a `workspace_members`.
+
+  CHECK ck_code_attempts: failed_attempt_count >= 0 AND max_attempts > 0.
+  CHECK ck_code_uses: max_uses IS NULL OR use_count <= max_uses.
+  CHECK ck_code_hint_len: code_hint IS NULL OR length(code_hint) <= 4.
+  Indice unico parcial real: un solo codigo activo por enlace si la politica
+  del workspace lo exige:
+    CREATE UNIQUE INDEX uq_sharecode_one_active ON share_access_codes
+      (shared_link_id) WHERE state = 'active';
+  '''
+}
+
+Table share_access_attempts {
+  id bigserial [pk]
+  shared_link_id uuid [not null]
+  share_access_code_id uuid [note: 'NULL si el selector no existia. Registrarlo NULL evita confirmar la existencia del codigo.']
+  result access_attempt_result [not null]
+  client_ip inet
+  client_ip_prefix inet [note: 'IP truncada (/24 IPv4, /64 IPv6) para rate limiting agregado con menos dato personal.']
+  user_agent_hash bytea [note: 'Hash, no el UA completo: suficiente para correlacionar, menos superficie de PII.']
+  authenticated_user_id uuid [note: 'Si quien intenta tiene sesion iniciada.']
+  attempted_at timestamptz [not null, default: `now()`]
+
+  Indexes {
+    (shared_link_id, attempted_at) [name: 'ix_attempt_link_time']
+    (client_ip_prefix, attempted_at) [name: 'ix_attempt_ip_time']
+    (result, attempted_at) [name: 'ix_attempt_result_time']
+    attempted_at [name: 'ix_attempt_time']
+  }
+  Note: '''
+  Tabla de alta rotacion. Decisiones:
+   - `bigserial` y no uuid: es append-only de alto volumen y nunca se referencia
+     desde fuera; un entero secuencial da mejor densidad de indice.
+   - PARTICIONADA POR RANGO sobre attempted_at (mensual) en la migracion real.
+     DBML no expresa particiones. La purga es DROP PARTITION, no DELETE masivo.
+   - Retencion: 90 dias por defecto.
+   - NO guarda el codigo intentado, ni completo ni parcial. Registrar el intento
+     fallido con el valor probado convertiria el log de seguridad en un
+     diccionario de codigos.
+  Sirve a dos requisitos: limitar intentos y registrar accesos y eventos
+  relevantes (seccion 6).
+  '''
+}
+
+// =============================================================================
+// BLOQUE 6 - VERSIONES, HISTORIAL Y CICLO DE VIDA DE LAS RESPUESTAS
+// Requisito no negociable: NO se almacenan indefinidamente todos los cuerpos
+// de respuesta. El metadato del historial se conserva; el cuerpo es un
+// artefacto opcional, con caducidad obligatoria y purga programada.
+// =============================================================================
+
+Table collection_versions {
+  id uuid [pk, default: `uuidv7()`]
+  collection_id uuid [not null]
+  version_number integer [not null, note: 'Monotono por coleccion, empieza en 1.']
+  parent_version_id uuid [note: 'Encadena versiones; permite reconstruir el linaje tras una restauracion.']
+  source version_source [not null, default: 'manual']
+  label text
+  change_summary text [note: 'Que cambio, en texto. Quien y cuando estan en las columnas.']
+  snapshot_file_id uuid [note: 'Instantanea serializada en almacenamiento de objetos. Preferida para colecciones grandes.']
+  snapshot_inline jsonb [note: 'Instantanea embebida, solo para colecciones pequenas. Excluyente con snapshot_file_id.']
+  snapshot_sha256 bytea [not null]
+  snapshot_size_bytes bigint [not null, default: 0]
+  request_count integer [not null, default: 0]
+  secrets_excluded boolean [not null, default: true, note: 'Invariante: SIEMPRE true. La instantanea contiene metadatos y referencias, nunca material criptografico.']
+  created_by_user_id uuid
+  created_at timestamptz [not null, default: `now()`]
+
+  Indexes {
+    (collection_id, version_number) [unique, name: 'uq_version_collection_number']
+    (collection_id, created_at) [name: 'ix_version_collection_time']
+    parent_version_id [name: 'ix_version_parent']
+    snapshot_file_id [name: 'ix_version_file']
+  }
+  Note: '''
+  Versionado de la seccion 15: quien modifico que y cuando, comparar versiones
+  y restaurar.
+
+  CHECK ck_version_storage: exactamente uno de (snapshot_file_id, snapshot_inline).
+  CHECK ck_version_no_secrets: secrets_excluded = true.
+    Es un CHECK y no un valor por defecto a proposito: convierte en imposible,
+    a nivel de motor, insertar una version marcada como portadora de secretos.
+    Si alguien algun dia serializa credenciales en la instantanea, tiene que
+    borrar este CHECK en una migracion, y eso se ve en la revision.
+
+  Una RESTAURACION no borra nada: crea una version nueva con source='restore'
+  y parent_version_id apuntando a la restaurada. El historial es append-only.
+  Por eso esta tabla no tiene deleted_at.
+  '''
+}
+
+Table request_history {
+  id uuid [pk, default: `uuidv7()`]
+  workspace_id uuid [not null]
+  collection_id uuid [note: 'NULL si la solicitud fue efimera, no guardada en una coleccion.']
+  api_request_id uuid [note: 'NULL si la solicitud fue borrada o nunca existio como endpoint guardado.']
+  environment_id uuid
+  executed_by_user_id uuid [note: 'NULL si la ejecucion vino de un enlace compartido anonimo.']
+  shared_link_id uuid [note: 'No NULL si la ejecuto un visitante por enlace.']
+  collection_run_id uuid
+  // --- Metadatos que SI se conservan (seccion 15) ---
+  method http_method [not null]
+  method_custom text
+  url_final text [not null, note: 'URL efectiva con variables resueltas y SECRETOS REDACTADOS antes de persistir.']
+  url_host text [not null, note: 'Host extraido, para filtrar y agregar sin parsear la URL.']
+  request_size_bytes bigint
+  status_code smallint [note: 'NULL si no hubo respuesta (error de conexion).']
+  status_text text
+  outcome execution_outcome [not null]
+  error_code text
+  error_message text [note: 'Mensaje saneado. Nunca cabeceras ni cuerpo.']
+  duration_total_ms integer
+  duration_ttfb_ms integer [note: 'Tiempo hasta el primer byte (seccion 8).']
+  duration_dns_ms integer
+  duration_tls_ms integer
+  response_size_bytes bigint
+  response_content_type text
+  redirect_count smallint [not null, default: 0]
+  // --- Cuerpos: referencias OPCIONALES y CADUCABLES ---
+  request_headers_snapshot jsonb [note: 'Cabeceras ENVIADAS con los valores sensibles sustituidos por un marcador. Nunca el valor real.']
+  response_headers_snapshot jsonb [note: 'Cabeceras recibidas, con Set-Cookie y Authorization redactados.']
+  response_artifact_id uuid [note: 'NULL en la configuracion por defecto: el cuerpo NO se guarda.']
+  request_artifact_id uuid
+  body_persistence body_persistence [not null, default: 'none', note: 'Que politica se aplico a ESTA ejecucion. Se guarda para poder auditar por que existe o no un cuerpo.']
+  is_pinned boolean [not null, default: false, note: 'El usuario fija una entrada para que la purga por antiguedad no se la lleve.']
+  executed_at timestamptz [not null, default: `now()`]
+  expires_at timestamptz [not null, note: 'Caducidad del METADATO. Derivada de workspaces.history_retention_days.']
+
+  Indexes {
+    (workspace_id, executed_at) [name: 'ix_history_ws_time']
+    (api_request_id, executed_at) [name: 'ix_history_request_time']
+    (executed_by_user_id, executed_at) [name: 'ix_history_user_time']
+    (collection_id, executed_at) [name: 'ix_history_collection_time']
+    (workspace_id, status_code, executed_at) [name: 'ix_history_ws_status']
+    url_host [name: 'ix_history_host']
+    expires_at [name: 'ix_history_expiry']
+    collection_run_id [name: 'ix_history_run']
+    response_artifact_id [name: 'ix_history_artifact']
+  }
+  Note: '''
+  Tabla de mayor crecimiento del sistema. Decisiones de escala:
+   - PARTICIONADA POR RANGO sobre executed_at (mensual). La limpieza del
+     historial es DROP PARTITION, operacion O(1), no un DELETE de millones de
+     filas que infla el WAL y deja la tabla con bloat.
+     DBML no expresa particiones; va en la migracion.
+   - La PK real en una tabla particionada debe incluir la clave de particion:
+     PRIMARY KEY (id, executed_at). DBML solo deja declarar `id`.
+   - Los indices se crean por particion (indices locales).
+
+  NO SE GUARDAN SECRETOS (seccion 15, y es tambien lo que pide el cliente):
+   - `url_final` se persiste con los valores de variables secretas sustituidos
+     por un marcador. La URL con el token dentro NUNCA llega a disco.
+   - Los dos jsonb de cabeceras guardan los NOMBRES y, para las cabeceras
+     sensibles, un marcador en vez del valor.
+   - `error_message` es saneado.
+
+  LOS CUERPOS NO SE GUARDAN POR DEFECTO:
+   `body_persistence` por defecto es none y `response_artifact_id` queda NULL.
+   El metadato de la seccion 15 (metodo, URL, fecha, estado, duracion, tamano,
+   workspace, coleccion, endpoint) se conserva igual, que es justo lo que pide
+   el requisito, y volver a ejecutar una entrada del historial no necesita el
+   cuerpo de la respuesta anterior.
+  '''
+}
+
+Table response_artifacts {
+  id uuid [pk, default: `uuidv7()`]
+  workspace_id uuid [not null]
+  storage storage_backend [not null, default: 'object_store']
+  storage_key text [note: 'Clave en el almacen de objetos. NULL si storage = inline_db.']
+  inline_content bytea [note: 'Solo para contenido pequeno y truncado.']
+  content_type text
+  content_encoding text
+  size_bytes bigint [not null]
+  stored_bytes bigint [not null, note: 'Lo realmente guardado. Menor que size_bytes si esta truncado.']
+  is_truncated boolean [not null, default: false]
+  checksum_sha256 bytea
+  state artifact_state [not null, default: 'stored']
+  retention_reason text [note: 'Por que existe este artefacto: politica del workspace, fijado por el usuario, o adjunto a un fallo de test.']
+  created_at timestamptz [not null, default: `now()`]
+  expires_at timestamptz [not null, note: 'OBLIGATORIO. No hay forma de crear un artefacto sin caducidad.']
+  purged_at timestamptz
+
+  Indexes {
+    (state, expires_at) [name: 'ix_artifact_purge']
+    (workspace_id, created_at) [name: 'ix_artifact_ws_time']
+    storage_key [unique, name: 'uq_artifact_storage_key']
+  }
+  Note: '''
+  AQUI SE CUMPLE "no almacenar indefinidamente todos los cuerpos de respuesta".
+
+  Tres barreras, no una:
+   1. `expires_at` es NOT NULL. El modelo no admite un artefacto eterno.
+      Una fila sin caducidad no se puede insertar.
+   2. El cuerpo vive FUERA de la fila del historial, en una tabla 1:0..1. Lo
+      normal es que no exista. La purga borra el artefacto y deja intacto el
+      metadato del historial, que es barato y util.
+   3. `is_truncated` + `stored_bytes` permiten guardar solo los primeros N
+      bytes (workspaces.response_max_persist_bytes) en vez del cuerpo entero.
+
+  Purga: job periodico que recorre ix_artifact_purge, borra el objeto del
+  almacen, pone state='purged' y vacia storage_key/inline_content. La fila
+  sobrevive como lapida para que el historial pueda decir "habia un cuerpo y
+  caduco" en lugar de mentir con un 404 ambiguo.
+  CHECK ck_artifact_storage: (storage = 'inline_db') = (inline_content IS NOT NULL).
+  CHECK ck_artifact_sizes: stored_bytes <= size_bytes.
+  '''
+}
+
+Table retention_policies {
+  id uuid [pk, default: `uuidv7()`]
+  workspace_id uuid [not null]
+  history_retention_days integer [not null, default: 90]
+  response_body_persistence body_persistence [not null, default: 'none']
+  response_retention_days integer [not null, default: 7]
+  response_max_persist_bytes bigint [not null, default: 262144]
+  persist_only_on_failure boolean [not null, default: false, note: 'Guardar cuerpo solo cuando el test falla o el estado es 4xx/5xx. Caso de uso habitual, coste bajo.']
+  audit_retention_days integer [not null, default: 365]
+  attempt_log_retention_days integer [not null, default: 90]
+  pinned_item_max_age_days integer [note: 'NULL = las entradas fijadas no caducan nunca.']
+  updated_by_user_id uuid
+  updated_at timestamptz [not null, default: `now()`]
+
+  Indexes {
+    workspace_id [unique, name: 'uq_retention_workspace']
+  }
+  Note: '''
+  Una fila por workspace. Las columnas equivalentes en `workspaces` son el
+  valor por defecto en el momento de crearlo; esta tabla es la politica viva y
+  editable, con su propia auditoria de quien la cambio.
+  Duplicar los campos es deliberado: `workspaces` debe poder responder la
+  politica en la ruta caliente de ejecucion sin un JOIN adicional, y un trigger
+  mantiene ambas en sincronia.
+  '''
+}
+
+// =============================================================================
+// BLOQUE 7 - PRUEBAS Y EJECUCIONES DE COLECCION
+// =============================================================================
+
+Table test_definitions {
+  id uuid [pk, default: `uuidv7()`]
+  workspace_id uuid [not null]
+  collection_id uuid [note: 'Test de coleccion. Excluyente con api_request_id.']
+  api_request_id uuid [note: 'Test de endpoint. Excluyente con collection_id.']
+  name text [not null]
+  description text
+  kind test_kind [not null]
+  // --- Parametrizacion declarativa por tipo de asercion ---
+  target_path text [note: 'JSONPath o nombre de cabecera, segun el tipo.']
+  operator text [note: 'equals, not_equals, gt, lt, contains, matches...']
+  expected_value text
+  expected_json jsonb [note: 'Esquema JSON cuando kind = json_schema.']
+  max_response_time_ms integer
+  script_body text [note: 'Solo cuando kind = script. Se ejecuta en sandbox aislado; el esquema solo lo almacena.']
+  sequence_position integer [note: 'Orden dentro de una secuencia de solicitudes (kind = sequence).']
+  is_enabled boolean [not null, default: true]
+  fail_run_on_error boolean [not null, default: true]
+  sort_order integer [not null, default: 0]
+  created_by_user_id uuid
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+  deleted_at timestamptz
+
+  Indexes {
+    (api_request_id, sort_order) [name: 'ix_test_request_order']
+    (collection_id, sort_order) [name: 'ix_test_collection_order']
+    (workspace_id, kind) [name: 'ix_test_ws_kind']
+  }
+  Note: '''
+  Cubre las validaciones de la seccion 13: codigo HTTP, cabeceras, tiempo de
+  respuesta, esquema JSON, propiedades obligatorias, valores concretos,
+  expresiones, contenido y secuencias.
+  Las aserciones declarativas (todas menos script) se guardan parametrizadas y
+  no como codigo: se pueden ejecutar sin levantar el sandbox, que es mas rapido
+  y elimina la superficie de ataque del motor de scripts en el caso comun.
+  CHECK ck_test_scope: (collection_id IS NULL) <> (api_request_id IS NULL).
+  CHECK ck_test_script: (kind = 'script') = (script_body IS NOT NULL).
+  '''
+}
+
+Table collection_runs {
+  id uuid [pk, default: `uuidv7()`]
+  workspace_id uuid [not null]
+  collection_id uuid [not null]
+  environment_id uuid
+  folder_id uuid [note: 'Ejecutar solo una subcarpeta.']
+  name text
+  trigger run_trigger [not null, default: 'manual']
+  status run_status [not null, default: 'queued']
+  iterations integer [not null, default: 1]
+  delay_ms integer [not null, default: 0]
+  stop_on_failure boolean [not null, default: false]
+  variable_overrides jsonb [note: 'NIVEL EJECUCION de la precedencia (seccion 12). Efimero por naturaleza; se guarda solo para reproducir la tirada. CHECK + validacion de aplicacion impiden valores secretos aqui.']
+  total_requests integer [not null, default: 0]
+  completed_requests integer [not null, default: 0]
+  failed_requests integer [not null, default: 0]
+  total_tests integer [not null, default: 0]
+  passed_tests integer [not null, default: 0]
+  failed_tests integer [not null, default: 0]
+  total_duration_ms bigint
+  triggered_by_user_id uuid
+  shared_link_id uuid [note: 'Si la lanzo un visitante autorizado por enlace.']
+  started_at timestamptz
+  finished_at timestamptz
+  created_at timestamptz [not null, default: `now()`]
+  expires_at timestamptz [not null, note: 'Los resultados de ejecucion tambien caducan.']
+
+  Indexes {
+    (collection_id, created_at) [name: 'ix_run_collection_time']
+    (workspace_id, status, created_at) [name: 'ix_run_ws_status']
+    (status, created_at) [name: 'ix_run_status_time']
+    expires_at [name: 'ix_run_expiry']
+  }
+  Note: '''
+  El runner de colecciones (seccion 13: guardar resultados y comparar
+  ejecuciones). Los contadores estan desnormalizados a proposito: comparar dos
+  tiradas de 2000 solicitudes no puede exigir agregar test_runs cada vez.
+  CHECK ck_run_iterations: iterations BETWEEN 1 AND 1000.
+  CHECK ck_run_times: finished_at IS NULL OR started_at IS NOT NULL.
+  '''
+}
+
+Table test_runs {
+  id bigserial [pk]
+  test_definition_id uuid [note: 'NULL si el test fue borrado despues de ejecutarse. El resultado historico sobrevive.']
+  collection_run_id uuid [note: 'NULL en una ejecucion suelta de un endpoint.']
+  request_history_id uuid [note: 'Ejecucion HTTP concreta contra la que se evaluo la asercion.']
+  api_request_id uuid
+  iteration integer [not null, default: 1]
+  test_name_snapshot text [not null, note: 'Nombre del test en el momento de correr. Conserva legibilidad aunque luego lo renombren.']
+  kind test_kind [not null]
+  result test_result [not null]
+  expected_snapshot text
+  actual_snapshot text [note: 'Valor observado, TRUNCADO y saneado. Nunca un cuerpo completo ni una cabecera sensible.']
+  failure_message text
+  duration_ms integer
+  executed_at timestamptz [not null, default: `now()`]
+  expires_at timestamptz [not null]
+
+  Indexes {
+    (collection_run_id, executed_at) [name: 'ix_testrun_run']
+    (test_definition_id, executed_at) [name: 'ix_testrun_definition']
+    (result, executed_at) [name: 'ix_testrun_result']
+    request_history_id [name: 'ix_testrun_history']
+    expires_at [name: 'ix_testrun_expiry']
+  }
+  Note: '''
+  Alto volumen: una tirada de 2000 solicitudes con 5 aserciones cada una son
+  10000 filas. Por eso bigserial, particion mensual por executed_at y
+  `expires_at` obligatorio.
+  `actual_snapshot` se trunca: un test que falla no es excusa para persistir el
+  cuerpo entero de la respuesta y saltarse la politica de retencion.
+  `test_definition_id` es ON DELETE SET NULL, no CASCADE: borrar un test no
+  debe reescribir la historia de las tiradas pasadas.
+  '''
+}
+
+// =============================================================================
+// BLOQUE 8 - COLABORACION, AUDITORIA Y FICHEROS
+// =============================================================================
+
+Table comments {
+  id uuid [pk, default: `uuidv7()`]
+  workspace_id uuid [not null]
+  author_user_id uuid [note: 'NULL si la cuenta fue borrada; el comentario queda como de usuario eliminado.']
+  parent_comment_id uuid [note: 'Hilos de respuesta de profundidad arbitraria.']
+  // --- Objetivo: exactamente uno no nulo ---
+  collection_id uuid
+  collection_folder_id uuid
+  api_request_id uuid
+  body_markdown text [not null]
+  anchor jsonb [note: 'Anclaje opcional dentro del recurso, p.ej. una cabecera concreta.']
+  mentioned_user_ids uuid [note: 'Array uuid[] en la migracion real. DBML no expresa tipos array.']
+  is_edited boolean [not null, default: false]
+  resolved_at timestamptz
+  resolved_by_user_id uuid
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+  deleted_at timestamptz
+
+  Indexes {
+    (collection_id, created_at) [name: 'ix_comment_collection']
+    (api_request_id, created_at) [name: 'ix_comment_request']
+    (collection_folder_id, created_at) [name: 'ix_comment_folder']
+    parent_comment_id [name: 'ix_comment_parent']
+    (workspace_id, created_at) [name: 'ix_comment_ws_time']
+  }
+  Note: '''
+  Objetivo con FK explicitas nullables y no con un par (target_type, target_id)
+  polimorfico. Razon: el par polimorfico renuncia a la integridad referencial,
+  y aqui no hay motivo para renunciar a ella (son solo tres destinos posibles).
+  CHECK ck_comment_target: exactamente una de
+    (collection_id, collection_folder_id, api_request_id) no nula.
+  Borrado logico: un comentario borrado dentro de un hilo debe dejar el hilo
+  legible, por eso deleted_at y no DELETE.
+  '''
+}
+
+Table notifications {
+  id bigserial [pk]
+  recipient_user_id uuid [not null]
+  workspace_id uuid
+  kind notification_kind [not null]
+  title text [not null]
+  body text
+  payload jsonb [not null, default: `'{}'::jsonb`, note: 'Identificadores para construir el enlace. PROHIBIDO incluir secretos o codigos de acceso.']
+  actor_user_id uuid
+  // --- Referencias debiles al recurso que origino la notificacion ---
+  collection_id uuid
+  api_request_id uuid
+  collection_run_id uuid
+  comment_id uuid
+  invitation_id uuid
+  read_at timestamptz
+  dismissed_at timestamptz
+  emailed_at timestamptz
+  created_at timestamptz [not null, default: `now()`]
+  expires_at timestamptz [not null]
+
+  Indexes {
+    (recipient_user_id, created_at) [name: 'ix_notif_user_time']
+    (recipient_user_id, read_at) [name: 'ix_notif_user_unread']
+    (workspace_id, created_at) [name: 'ix_notif_ws_time']
+    expires_at [name: 'ix_notif_expiry']
+  }
+  Note: '''
+  Indice parcial real para el contador de no leidas, que es la consulta mas
+  frecuente de toda la aplicacion:
+    CREATE INDEX ix_notif_user_unread ON notifications (recipient_user_id)
+      WHERE read_at IS NULL AND dismissed_at IS NULL;
+  Todas las FK a recursos son ON DELETE CASCADE: una notificacion sobre algo
+  que ya no existe es ruido, no historia. La historia esta en audit_logs.
+  '''
+}
+
+Table audit_logs {
+  id bigserial [pk]
+  workspace_id uuid [note: 'NULL para eventos de plataforma sin workspace.']
+  actor_user_id uuid [note: 'NULL = sistema, job programado o actor anonimo por enlace compartido.']
+  actor_kind text [not null, default: 'user', note: 'user | system | job | share_visitor.']
+  actor_ip inet
+  actor_user_agent_hash bytea
+  session_id uuid
+  shared_link_id uuid [note: 'Trazabilidad de acciones hechas a traves de un enlace.']
+  action text [not null, note: 'Verbo en minusculas con puntos: collection.published, share_code.rotated, secret.rotated...']
+  target_type audit_target_type [not null]
+  target_id uuid
+  target_label text [note: 'Nombre legible en el momento del hecho. Sobrevive al renombrado y al borrado del objetivo.']
+  outcome text [not null, default: 'success', note: 'success | denied | error.']
+  metadata jsonb [not null, default: `'{}'::jsonb`, note: 'Contexto del hecho. PROHIBIDO escribir aqui secretos, codigos de acceso, tokens o cuerpos de respuesta. Validado por una lista blanca de claves en la capa de auditoria.']
+  occurred_at timestamptz [not null, default: `now()`]
+
+  Indexes {
+    (workspace_id, occurred_at) [name: 'ix_audit_ws_time']
+    (actor_user_id, occurred_at) [name: 'ix_audit_actor_time']
+    (target_type, target_id, occurred_at) [name: 'ix_audit_target']
+    (action, occurred_at) [name: 'ix_audit_action_time']
+    occurred_at [name: 'ix_audit_time']
+  }
+  Note: '''
+  APPEND-ONLY. Sin deleted_at, sin updated_at, sin UPDATE.
+  En la migracion real se revocan UPDATE y DELETE al rol de la aplicacion y se
+  concede solo INSERT y SELECT. Un registro de auditoria que la aplicacion
+  puede reescribir no es un registro de auditoria.
+
+  `action` es text y no enum deliberadamente: las acciones auditables crecen en
+  cada funcionalidad nueva, y un enum obligaria a una migracion ALTER TYPE por
+  cada verbo. A cambio, CHECK de formato:
+    CHECK (action ~ '^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$')
+  `target_type` SI es enum porque el conjunto de tipos de recurso es cerrado.
+
+  Las FK a actor y objetivo son ON DELETE SET NULL, nunca CASCADE: borrar un
+  usuario no puede borrar la evidencia de lo que hizo. Por eso existe
+  `target_label`, que conserva el nombre aunque el objetivo desaparezca.
+
+  PARTICIONADA POR RANGO sobre occurred_at (mensual). Retencion configurable
+  por workspace (retention_policies.audit_retention_days), por defecto 365 dias.
+  '''
+}
+
+Table files {
+  id uuid [pk, default: `uuidv7()`]
+  workspace_id uuid [note: 'NULL para ficheros de plataforma, p.ej. avatares de usuario.']
+  owner_user_id uuid
+  purpose file_purpose [not null]
+  storage storage_backend [not null, default: 'object_store']
+  storage_key text [not null]
+  original_filename text
+  content_type text [not null, default: 'application/octet-stream']
+  size_bytes bigint [not null]
+  checksum_sha256 bytea [not null]
+  scan_status file_scan_status [not null, default: 'pending']
+  scan_detail text
+  is_public boolean [not null, default: false, note: 'Solo avatares e iconos. Un fichero adjunto a una solicitud NUNCA es publico.']
+  reference_count integer [not null, default: 0, note: 'Deduplicacion por checksum: varios cuerpos pueden apuntar al mismo objeto.']
+  uploaded_at timestamptz [not null, default: `now()`]
+  expires_at timestamptz [note: 'NULL = permanente (certificado, adjunto de una solicitud viva). No NULL para importaciones y exportaciones temporales.']
+  deleted_at timestamptz
+  purged_at timestamptz
+
+  Indexes {
+    storage_key [unique, name: 'uq_files_storage_key']
+    (workspace_id, purpose) [name: 'ix_files_ws_purpose']
+    checksum_sha256 [name: 'ix_files_checksum']
+    (scan_status, uploaded_at) [name: 'ix_files_scan_queue']
+    expires_at [name: 'ix_files_expiry']
+  }
+  Note: '''
+  Metadatos de ficheros; los bytes viven en el almacen de objetos.
+  `files` NO guarda claves privadas ni material criptografico: esas van a
+  `secrets` cifradas. Aqui van el certificado publico, el bundle de CA, los
+  adjuntos de multipart, las instantaneas de version y los ficheros importados.
+  CHECK ck_file_size: size_bytes >= 0 AND size_bytes <= 104857600 (limite de
+  tamano de la seccion 16; el valor exacto es configurable por despliegue).
+  CHECK ck_file_public: is_public = false OR purpose IN
+    ('user_avatar','workspace_icon').
+  Un fichero con scan_status <> 'clean' no se sirve nunca.
+  '''
+}
+
+// =============================================================================
+// BLOQUE 9 - RELACIONES Y POLITICAS DE BORRADO EXPLICITAS
+//
+// Todas las claves foraneas se declaran AQUI, no en linea junto a la columna.
+// Es deliberado: el prompt maestro exige "relaciones y politicas de borrado
+// explicitas", y tenerlas en un unico bloque las hace auditables de una sola
+// lectura. Ninguna FK se queda con el comportamiento por defecto implicito.
+//
+// Criterio aplicado:
+//   cascade   -> el hijo no tiene vida propia sin el padre (detalle dependiente).
+//   set null  -> el hijo sobrevive y pierde una referencia opcional. Se usa en
+//                TODO lo que es evidencia historica (historial, auditoria,
+//                resultados de tests): borrar un actor no borra lo que hizo.
+//   restrict  -> borrar el padre exige una decision humana previa. Se usa donde
+//                un borrado silencioso seria un fallo de seguridad o una
+//                perdida de material criptografico.
+// =============================================================================
+
+// --- Identidad y acceso ---------------------------------------------------
+Ref fk_users_avatar: users.avatar_file_id > files.id [delete: set null]
+Ref fk_users_mfa_secret: users.mfa_secret_id > secrets.id [delete: set null]
+Ref fk_sessions_user: sessions.user_id > users.id [delete: cascade]
+Ref fk_sessions_parent: sessions.parent_session_id > sessions.id [delete: set null]
+
+// --- Workspaces y miembros ------------------------------------------------
+Ref fk_ws_owner: workspaces.owner_user_id > users.id [delete: restrict]
+Ref fk_ws_icon: workspaces.icon_file_id > files.id [delete: set null]
+Ref fk_ws_deleted_by: workspaces.deleted_by_user_id > users.id [delete: set null]
+Ref fk_member_ws: workspace_members.workspace_id > workspaces.id [delete: cascade]
+Ref fk_member_user: workspace_members.user_id > users.id [delete: cascade]
+Ref fk_member_invited_by: workspace_members.invited_by_user_id > users.id [delete: set null]
+Ref fk_inv_ws: invitations.workspace_id > workspaces.id [delete: cascade]
+Ref fk_inv_invited_by: invitations.invited_by_user_id > users.id [delete: set null]
+Ref fk_inv_accepted_by: invitations.accepted_by_user_id > users.id [delete: set null]
+
+// --- Organizacion ---------------------------------------------------------
+Ref fk_project_ws: projects.workspace_id > workspaces.id [delete: cascade]
+Ref fk_project_creator: projects.created_by_user_id > users.id [delete: set null]
+Ref fk_project_deleter: projects.deleted_by_user_id > users.id [delete: set null]
+
+Ref fk_collection_ws: collections.workspace_id > workspaces.id [delete: cascade]
+Ref fk_collection_project: collections.project_id > projects.id [delete: set null]
+Ref fk_collection_auth: collections.default_auth_configuration_id > auth_configurations.id [delete: set null]
+Ref fk_collection_source: collections.source_file_id > files.id [delete: set null]
+Ref fk_collection_creator: collections.created_by_user_id > users.id [delete: set null]
+Ref fk_collection_deleter: collections.deleted_by_user_id > users.id [delete: set null]
+
+Ref fk_folder_collection: collection_folders.collection_id > collections.id [delete: cascade]
+Ref fk_folder_parent: collection_folders.parent_folder_id > collection_folders.id [delete: cascade]
+Ref fk_folder_auth: collection_folders.auth_configuration_id > auth_configurations.id [delete: set null]
+Ref fk_folder_creator: collection_folders.created_by_user_id > users.id [delete: set null]
+Ref fk_folder_deleter: collection_folders.deleted_by_user_id > users.id [delete: set null]
+
+Ref fk_request_collection: api_requests.collection_id > collections.id [delete: cascade]
+Ref fk_request_folder: api_requests.folder_id > collection_folders.id [delete: cascade]
+Ref fk_request_cert: api_requests.client_certificate_id > client_certificates.id [delete: set null]
+Ref fk_request_auth: api_requests.auth_configuration_id > auth_configurations.id [delete: set null]
+Ref fk_request_creator: api_requests.created_by_user_id > users.id [delete: set null]
+Ref fk_request_deleter: api_requests.deleted_by_user_id > users.id [delete: set null]
+
+Ref fk_header_request: request_headers.api_request_id > api_requests.id [delete: cascade]
+Ref fk_header_secret: request_headers.secret_id > secrets.id [delete: restrict]
+Ref fk_param_request: request_params.api_request_id > api_requests.id [delete: cascade]
+Ref fk_param_secret: request_params.secret_id > secrets.id [delete: restrict]
+Ref fk_body_request: request_bodies.api_request_id - api_requests.id [delete: cascade]
+Ref fk_body_file: request_bodies.binary_file_id > files.id [delete: set null]
+Ref fk_bodyfield_body: request_body_fields.request_body_id > request_bodies.id [delete: cascade]
+Ref fk_bodyfield_secret: request_body_fields.secret_id > secrets.id [delete: restrict]
+Ref fk_bodyfield_file: request_body_fields.file_id > files.id [delete: set null]
+
+Ref fk_tag_ws: tags.workspace_id > workspaces.id [delete: cascade]
+Ref fk_reqtag_request: request_tags.api_request_id > api_requests.id [delete: cascade]
+Ref fk_reqtag_tag: request_tags.tag_id > tags.id [delete: cascade]
+Ref fk_reqtag_user: request_tags.tagged_by_user_id > users.id [delete: set null]
+
+// --- Boveda y autenticacion -----------------------------------------------
+Ref fk_secret_ws: secrets.workspace_id > workspaces.id [delete: cascade]
+Ref fk_secret_rotation: secrets.rotated_from_secret_id > secrets.id [delete: set null]
+Ref fk_secret_creator: secrets.created_by_user_id > users.id [delete: set null]
+Ref fk_authcfg_ws: auth_configurations.workspace_id > workspaces.id [delete: cascade]
+Ref fk_authcfg_creator: auth_configurations.created_by_user_id > users.id [delete: set null]
+Ref fk_authcred_cfg: auth_credentials.auth_configuration_id > auth_configurations.id [delete: cascade]
+Ref fk_authcred_secret: auth_credentials.secret_id > secrets.id [delete: cascade]
+Ref fk_authcred_owner: auth_credentials.owner_user_id > users.id [delete: cascade]
+
+Ref fk_cert_ws: client_certificates.workspace_id > workspaces.id [delete: cascade]
+Ref fk_cert_file: client_certificates.certificate_file_id > files.id [delete: restrict]
+Ref fk_cert_key: client_certificates.private_key_secret_id > secrets.id [delete: restrict]
+Ref fk_cert_passphrase: client_certificates.passphrase_secret_id > secrets.id [delete: set null]
+Ref fk_cert_ca: client_certificates.ca_bundle_file_id > files.id [delete: set null]
+Ref fk_cert_creator: client_certificates.created_by_user_id > users.id [delete: set null]
+
+Ref fk_cookie_ws: cookie_jar_entries.workspace_id > workspaces.id [delete: cascade]
+Ref fk_cookie_env: cookie_jar_entries.environment_id > environments.id [delete: cascade]
+Ref fk_cookie_owner: cookie_jar_entries.owner_user_id > users.id [delete: cascade]
+Ref fk_cookie_secret: cookie_jar_entries.value_secret_id > secrets.id [delete: cascade]
+
+// --- Entornos y variables -------------------------------------------------
+Ref fk_env_ws: environments.workspace_id > workspaces.id [delete: cascade]
+Ref fk_env_collection: environments.collection_id > collections.id [delete: cascade]
+Ref fk_env_owner: environments.owner_user_id > users.id [delete: cascade]
+Ref fk_env_creator: environments.created_by_user_id > users.id [delete: set null]
+Ref fk_env_deleter: environments.deleted_by_user_id > users.id [delete: set null]
+Ref fk_envvar_env: environment_variables.environment_id > environments.id [delete: cascade]
+Ref fk_envvar_secret: environment_variables.secret_id > secrets.id [delete: restrict]
+Ref fk_varlocal_envvar: variable_local_values.environment_variable_id > environment_variables.id [delete: cascade]
+Ref fk_varlocal_scopedvar: variable_local_values.scoped_variable_id > scoped_variables.id [delete: cascade]
+Ref fk_varlocal_user: variable_local_values.user_id > users.id [delete: cascade]
+Ref fk_varlocal_secret: variable_local_values.secret_id > secrets.id [delete: cascade]
+Ref fk_scopedvar_ws: scoped_variables.workspace_id > workspaces.id [delete: cascade]
+Ref fk_scopedvar_collection: scoped_variables.collection_id > collections.id [delete: cascade]
+Ref fk_scopedvar_request: scoped_variables.api_request_id > api_requests.id [delete: cascade]
+Ref fk_scopedvar_secret: scoped_variables.secret_id > secrets.id [delete: restrict]
+Ref fk_scopedvar_creator: scoped_variables.created_by_user_id > users.id [delete: set null]
+
+// --- Comparticion ---------------------------------------------------------
+Ref fk_share_collection: shared_links.collection_id > collections.id [delete: cascade]
+Ref fk_share_ws: shared_links.workspace_id > workspaces.id [delete: cascade]
+Ref fk_share_creator: shared_links.created_by_user_id > users.id [delete: restrict]
+Ref fk_share_revoker: shared_links.revoked_by_user_id > users.id [delete: set null]
+Ref fk_sharecode_link: share_access_codes.shared_link_id > shared_links.id [delete: cascade]
+Ref fk_sharecode_rotation: share_access_codes.rotated_from_code_id > share_access_codes.id [delete: set null]
+Ref fk_sharecode_creator: share_access_codes.created_by_user_id > users.id [delete: restrict]
+Ref fk_sharecode_revoker: share_access_codes.revoked_by_user_id > users.id [delete: set null]
+Ref fk_attempt_link: share_access_attempts.shared_link_id > shared_links.id [delete: cascade]
+Ref fk_attempt_code: share_access_attempts.share_access_code_id > share_access_codes.id [delete: set null]
+Ref fk_attempt_user: share_access_attempts.authenticated_user_id > users.id [delete: set null]
+
+// --- Versiones, historial y artefactos ------------------------------------
+Ref fk_version_collection: collection_versions.collection_id > collections.id [delete: cascade]
+Ref fk_version_parent: collection_versions.parent_version_id > collection_versions.id [delete: set null]
+Ref fk_version_file: collection_versions.snapshot_file_id > files.id [delete: restrict]
+Ref fk_version_creator: collection_versions.created_by_user_id > users.id [delete: set null]
+
+Ref fk_history_ws: request_history.workspace_id > workspaces.id [delete: cascade]
+Ref fk_history_collection: request_history.collection_id > collections.id [delete: set null]
+Ref fk_history_request: request_history.api_request_id > api_requests.id [delete: set null]
+Ref fk_history_env: request_history.environment_id > environments.id [delete: set null]
+Ref fk_history_user: request_history.executed_by_user_id > users.id [delete: set null]
+Ref fk_history_share: request_history.shared_link_id > shared_links.id [delete: set null]
+Ref fk_history_run: request_history.collection_run_id > collection_runs.id [delete: cascade]
+Ref fk_history_resp_artifact: request_history.response_artifact_id > response_artifacts.id [delete: set null]
+Ref fk_history_req_artifact: request_history.request_artifact_id > response_artifacts.id [delete: set null]
+Ref fk_artifact_ws: response_artifacts.workspace_id > workspaces.id [delete: cascade]
+Ref fk_retention_ws: retention_policies.workspace_id - workspaces.id [delete: cascade]
+Ref fk_retention_user: retention_policies.updated_by_user_id > users.id [delete: set null]
+
+// --- Pruebas --------------------------------------------------------------
+Ref fk_test_ws: test_definitions.workspace_id > workspaces.id [delete: cascade]
+Ref fk_test_collection: test_definitions.collection_id > collections.id [delete: cascade]
+Ref fk_test_request: test_definitions.api_request_id > api_requests.id [delete: cascade]
+Ref fk_test_creator: test_definitions.created_by_user_id > users.id [delete: set null]
+Ref fk_run_ws: collection_runs.workspace_id > workspaces.id [delete: cascade]
+Ref fk_run_collection: collection_runs.collection_id > collections.id [delete: cascade]
+Ref fk_run_env: collection_runs.environment_id > environments.id [delete: set null]
+Ref fk_run_folder: collection_runs.folder_id > collection_folders.id [delete: set null]
+Ref fk_run_user: collection_runs.triggered_by_user_id > users.id [delete: set null]
+Ref fk_run_share: collection_runs.shared_link_id > shared_links.id [delete: set null]
+Ref fk_testrun_definition: test_runs.test_definition_id > test_definitions.id [delete: set null]
+Ref fk_testrun_run: test_runs.collection_run_id > collection_runs.id [delete: cascade]
+Ref fk_testrun_history: test_runs.request_history_id > request_history.id [delete: set null]
+Ref fk_testrun_request: test_runs.api_request_id > api_requests.id [delete: set null]
+
+// --- Colaboracion, auditoria y ficheros -----------------------------------
+Ref fk_comment_ws: comments.workspace_id > workspaces.id [delete: cascade]
+Ref fk_comment_author: comments.author_user_id > users.id [delete: set null]
+Ref fk_comment_parent: comments.parent_comment_id > comments.id [delete: cascade]
+Ref fk_comment_collection: comments.collection_id > collections.id [delete: cascade]
+Ref fk_comment_folder: comments.collection_folder_id > collection_folders.id [delete: cascade]
+Ref fk_comment_request: comments.api_request_id > api_requests.id [delete: cascade]
+Ref fk_comment_resolver: comments.resolved_by_user_id > users.id [delete: set null]
+
+Ref fk_notif_recipient: notifications.recipient_user_id > users.id [delete: cascade]
+Ref fk_notif_ws: notifications.workspace_id > workspaces.id [delete: cascade]
+Ref fk_notif_actor: notifications.actor_user_id > users.id [delete: set null]
+Ref fk_notif_collection: notifications.collection_id > collections.id [delete: cascade]
+Ref fk_notif_request: notifications.api_request_id > api_requests.id [delete: cascade]
+Ref fk_notif_run: notifications.collection_run_id > collection_runs.id [delete: cascade]
+Ref fk_notif_comment: notifications.comment_id > comments.id [delete: cascade]
+Ref fk_notif_invitation: notifications.invitation_id > invitations.id [delete: cascade]
+
+Ref fk_audit_ws: audit_logs.workspace_id > workspaces.id [delete: set null]
+Ref fk_audit_actor: audit_logs.actor_user_id > users.id [delete: set null]
+Ref fk_audit_session: audit_logs.session_id > sessions.id [delete: set null]
+Ref fk_audit_share: audit_logs.shared_link_id > shared_links.id [delete: set null]
+
+Ref fk_file_ws: files.workspace_id > workspaces.id [delete: cascade]
+Ref fk_file_owner: files.owner_user_id > users.id [delete: set null]
+
+// =============================================================================
+// NOTAS FINALES (lo que DBML no puede expresar y la migracion si debe hacer)
+//
+// 1. CICLOS DE FK. users.avatar_file_id <-> files.owner_user_id y
+//    workspaces.icon_file_id <-> files.workspace_id forman ciclos. Ambos lados
+//    son NULLABLE, asi que son insertables en dos pasos. Declarar las dos FK de
+//    avatar/icono como DEFERRABLE INITIALLY DEFERRED simplifica las cargas.
+//
+// 2. TABLAS PARTICIONADAS POR RANGO (mensual): request_history, audit_logs,
+//    test_runs y share_access_attempts. En PostgreSQL la PK de una tabla
+//    particionada debe incluir la columna de particion, de modo que las PK
+//    reales son (id, executed_at), (id, occurred_at), (id, executed_at) y
+//    (id, attempted_at). DBML solo permite declarar `id`.
+//
+// 3. INDICES PARCIALES. DBML no tiene WHERE. Los indices marcados como
+//    parciales en las notas de cada tabla deben crearse con su predicado en la
+//    migracion; sin el, los unicos rompen la reutilizacion de nombres tras un
+//    borrado logico.
+//
+// 4. EXTENSIONES REQUERIDAS: citext (correos y slugs sin distincion de
+//    mayusculas), pg_trgm (busqueda por nombre y URL de la seccion 11),
+//    pgcrypto si se usa gen_random_uuid() en PostgreSQL < 18.
+//
+// 5. CHECKS. DBML no los expresa. Estan enunciados uno a uno en las notas de
+//    cada tabla y recogidos en MODELO-DATOS.md.
+//
+// 6. ESTE ESQUEMA NO SE HA EJECUTADO. No hay PostgreSQL ni psql en el entorno
+//    donde se escribio (verificado el 2026-10-14). Los comandos para validarlo
+//    donde si haya motor estan en MODELO-DATOS.md, seccion Validacion.
+// =============================================================================
