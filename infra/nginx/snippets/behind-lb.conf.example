@@ -1,0 +1,56 @@
+# CEIBA — variante para cuando Nginx va DETRÁS de un balanceador que ya
+# termina TLS (HTTPS Load Balancer de GCP, Cloud Armor, Cloudflare…).
+#
+# [NO VERIFICADO] Plantilla no ejecutada. Es un `.example` a propósito: no se
+# carga sola, hay que copiarla y adaptarla conscientemente.
+#
+# EL PELIGRO QUE EVITA ESTE FICHERO
+# En ese escenario Nginx recibe HTTP en claro desde el balanceador, así que
+# `$scheme` vale `http` y la API dejaría de emitir cookies `Secure` (C-31).
+# La tentación es confiar en `X-Forwarded-Proto`. Si se confía SIN restringir
+# quién puede enviarla, cualquiera que alcance Nginx directamente puede
+# afirmar «vengo por https» y manipular la decisión de la sesión.
+#
+# Por eso las dos piezas van JUNTAS o no va ninguna:
+#   1. `set_real_ip_from` con los rangos REALES del balanceador, y
+#   2. el `map` que confía en la cabecera.
+#
+# ---------------------------------------------------------------------------
+# PASO 1 — en el bloque `http {}` de nginx.conf, sustituye el map por:
+# ---------------------------------------------------------------------------
+#
+#   map $http_x_forwarded_proto $ceiba_forwarded_proto {
+#       default  $scheme;   # si el balanceador no la manda, el esquema real
+#       https    https;
+#       http     http;
+#   }
+#
+# ---------------------------------------------------------------------------
+# PASO 2 — y también en `http {}`, declara de quién te fías.
+# ---------------------------------------------------------------------------
+# Rangos desde los que el balanceador de Google Cloud y sus comprobaciones de
+# estado originan el tráfico.
+#
+# [VERIFICADO el 2026-10-14] Leídos de la documentación oficial de Google
+# (cloud.google.com/load-balancing/docs/https y .../health-check-concepts):
+#   IPv4:  130.211.0.0/22 · 35.191.0.0/16
+#   IPv6:  2600:2d00:1:b029::/64 · 2600:1901:8001::/48
+# Vuelve a comprobarlos antes de desplegar: Google los ha ampliado en el
+# pasado y un rango que falte aquí deja clientes sin servicio, mientras que
+# uno de más es un agujero de confianza.
+#
+#   set_real_ip_from 130.211.0.0/22;
+#   set_real_ip_from 35.191.0.0/16;
+#   set_real_ip_from 2600:2d00:1:b029::/64;
+#   set_real_ip_from 2600:1901:8001::/48;
+#   real_ip_header   X-Forwarded-For;
+#   # El LB de GCP añade su propia entrada al final; `recursive on` hace que
+#   # Nginx descarte las direcciones de confianza y se quede con la del cliente.
+#   real_ip_recursive on;
+#
+# ---------------------------------------------------------------------------
+# PASO 3 — bloquea el acceso directo que se salte el balanceador.
+# ---------------------------------------------------------------------------
+# Con reglas de cortafuegos de la VPC: que los puertos de Nginx sólo acepten
+# tráfico desde los rangos del balanceador. Sin este paso, los pasos 1 y 2
+# siguen siendo falsificables por quien alcance la máquina.

@@ -1,0 +1,30 @@
+# CEIBA — configuración de hadolint para los Dockerfiles de infra/.
+#
+# Ejecutado de verdad el 2026-10-14 con hadolint 2.15.1 sobre los cinco
+# Dockerfiles. Las reglas silenciadas lo están con motivo, no por comodidad:
+# cada una tiene aquí su razón escrita.
+
+failure-threshold: warning
+
+ignored:
+  # DL3008 — «fija las versiones en apt-get install».
+  # Se ignora a conciencia. Sólo instalamos `openssl` y `ca-certificates`.
+  # Fijar su versión exacta de Debian hace DOS cosas malas a la vez:
+  #   1. congela el almacén de certificados raíz y los parches de OpenSSL,
+  #      justo los dos paquetes donde quieres las actualizaciones; y
+  #   2. rompe el build cuando el archivo de Debian rota el punto de versión,
+  #      lo que ocurre cada pocas semanas en bookworm.
+  # La reproducibilidad se consigue fijando la imagen base por digest
+  # (DESPLIEGUE.md §3.2), que es el mecanismo correcto, no congelando apt.
+  - DL3008
+
+  # DL3018 — lo mismo para `apk add` en la imagen del proxy, donde además el
+  # paquete (`openssl`) se instala y se desinstala en la misma capa, sólo para
+  # generar un certificado efímero con el que validar `nginx -t`.
+  - DL3018
+
+  # DL3059 — «instrucciones RUN consecutivas, considera fusionarlas».
+  # Están separadas a propósito: `pnpm install`, `prisma generate` y el build
+  # son tres pasos con invalidación de caché distinta. Fusionarlos obliga a
+  # reinstalar dependencias cada vez que cambia una línea de código.
+  - DL3059

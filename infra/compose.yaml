@@ -1,0 +1,546 @@
+# CEIBA API Studio — pila de contenedores.
+#
+# ============================================================================
+# [NO VERIFICADO] — NADA DE ESTE FICHERO SE HA EJECUTADO.
+# En el contenedor donde se escribió no existe `docker`, ni `docker compose`,
+# ni `/var/run/docker.sock`, ni `postgres`, ni `redis-server`, ni root.
+# Comprobado el 2026-10-14 (ver DESPLIEGUE.md §1). Lo único validado aquí es
+# la SINTAXIS YAML y las invariantes estructurales del §C-25 (ver
+# `infra/scripts/check-engine-isolation.mjs`). El comportamiento en ejecución
+# —arranque, healthchecks, redes, persistencia— NO está demostrado.
+# ============================================================================
+#
+# Arranque canónico, DESDE LA RAÍZ DEL REPOSITORIO:
+#
+#   cp .env.example .env            # y rellenar los valores <generar>
+#   docker compose --env-file .env -f infra/compose.yaml up -d --wait
+#
+# `--env-file .env` es obligatorio: con `-f infra/compose.yaml` el directorio
+# de proyecto pasa a ser `infra/`, y Compose buscaría la interpolación en
+# `infra/.env`, que no existe ni debe existir.
+#
+# ---------------------------------------------------------------------------
+# TOPOLOGÍA — por qué está así (decisión C-25 del cliente + ADR-0002)
+# ---------------------------------------------------------------------------
+# El aislamiento del motor es una propiedad de la TOPOLOGÍA, no una promesa
+# del código. Cuatro redes, y el motor no está en la que lleva a los datos:
+#
+#   edge           (bridge, con salida)  nginx · web · api
+#   data           (INTERNA, sin salida) postgres · redis · api · migrator
+#   engine_link    (INTERNA, sin salida) api · engine          <- el canal API→motor
+#   engine_egress  (bridge, con salida)  engine                <- única salida ARBITRARIA
+#
+#   PRECISIÓN NECESARIA, porque la regla 4 del ADR-0002 dice «el motor es el
+#   único proceso con salida a Internet»: aquí NO es literalmente cierto.
+#   `edge` es una bridge normal, así que `proxy`, `web` y `api` también tienen
+#   salida. Es deliberado —la API necesita SMTP y Vertex AI (.env.example)— y
+#   lo que de verdad se garantiza es más estrecho: el motor es el único con
+#   salida hacia destinos ARBITRARIOS ELEGIDOS POR EL USUARIO, porque es el
+#   único que ejecuta URLs de usuario. Acotar la salida de `api` y `web` por
+#   destino es trabajo de cortafuegos de VPC. [NO VERIFICADO] No está hecho.
+#
+#   · El motor NO está en `data`. No hay ruta ni DNS hacia `postgres` ni
+#     `redis`: no es que no tenga la contraseña, es que no tiene el cable.
+#   · El motor NO usa `env_file`. Sus variables se enumeran una a una, para
+#     que sea imposible colar `DATABASE_URL` o `CEIBA_SECRETS_MASTER_KEY` por
+#     la puerta de atrás de un fichero compartido. Esto es la regla 1 y 2 del
+#     ADR-0002.
+#   · `engine_egress` tiene subred propia y fija, para que una regla de
+#     cortafuegos del host o de la VPC pueda apuntar exactamente al motor
+#     (regla 4 del ADR-0002: es el único proceso con salida arbitraria).
+#   · `engine_link` es interna: el canal API→motor no da salida a Internet.
+#
+# Lo verifica una máquina, no un revisor humano:
+#
+#   docker compose --env-file .env -f infra/compose.yaml config --format json \
+#     | node infra/scripts/check-engine-isolation.mjs
+#
+# `--env-file .env` tampoco es opcional aquí (misma razón que arriba), y la
+# TUBERÍA es obligatoria: `docker compose config` SIN tubería imprime por
+# pantalla el `.env` ya resuelto del servicio `api`, incluida
+# CEIBA_SECRETS_MASTER_KEY. Nunca lo vuelques a un artefacto de CI.
+#
+# ALCANCE DE ESA COMPROBACIÓN, sin adornos: cubre las reglas 1, 2 y 3 del
+# ADR-0002 (sin credenciales, sin clave maestra, sin ruta a los datos) más el
+# endurecimiento del contenedor. Las reglas 4 y 5 (única salida arbitraria, sin
+# estado) NO las comprueba ninguna máquina todavía: la 4 se mide en ejecución
+# con el job `stack` del CI, y la 5 es propiedad del código del motor, cubierta
+# por sus pruebas en `apps/engine/test/`.
+#
+# ---------------------------------------------------------------------------
+# PERSISTENCIA — criterio 15 del §24 («Docker conserve los datos tras reinicios»)
+# ---------------------------------------------------------------------------
+#   · Todo dato vivo está en un VOLUMEN CON NOMBRE, nunca en la capa de
+#     escritura del contenedor ni en un `tmpfs`.
+#   · `restart: unless-stopped` en todos los servicios de larga vida.
+#   · PostgreSQL escribe en un subdirectorio (`PGDATA=.../pgdata`), para que el
+#     `lost+found` de un volumen no lo haga fallar al inicializar.
+#   · Redis con AOF (`appendonly yes`) + RDB: un `docker compose restart` no
+#     puede perder la cola ni la caché.
+#   · `docker compose down` NO borra volúmenes. `down -v` SÍ: no se usa fuera
+#     de CI. El procedimiento de comprobación está en DESPLIEGUE.md §8.
+
+name: ceiba
+
+# ---------------------------------------------------------------------------
+# Fragmentos reutilizables
+# ---------------------------------------------------------------------------
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+# Endurecimiento para los servicios Node propios: arrancan ya como usuario sin
+# privilegios desde el Dockerfile, así que pueden soltar TODAS las capacidades.
+x-node-hardening: &node-hardening
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  read_only: true
+  # `node` corre como PID 1. `init` inserta un reaper que recoge los procesos
+  # zombis y reenvia las senales, para que `docker compose stop` apague
+  # ordenadamente en vez de esperar al timeout y matar.
+  init: true
+
+# Las imágenes oficiales de postgres/redis/nginx arrancan como root y bajan de
+# privilegios con gosu/su-exec; `cap_drop: ALL` les rompería ese arranque.
+# Se les deja `no-new-privileges`, que sí es seguro. El endurecimiento fino por
+# capacidades está propuesto y comentado en DESPLIEGUE.md §9.
+x-image-hardening: &image-hardening
+  security_opt:
+    - no-new-privileges:true
+
+services:
+
+  # =========================================================================
+  # PostgreSQL — nunca publicado al host en producción
+  # =========================================================================
+  postgres:
+    image: ${CEIBA_POSTGRES_IMAGE:-postgres:17-bookworm}
+    container_name: ceiba-postgres
+    restart: unless-stopped
+    <<: *image-hardening
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ceiba}
+      POSTGRES_USER: ${POSTGRES_USER:-ceiba}
+      # Entrecomillado obligatorio: el mensaje lleva ": " y sin comillas YAML
+      # lo interpreta como un mapa anidado. Lo detectó el parser (DESPLIEGUE.md §2).
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD es obligatorio; generalo con openssl rand -base64 48}"
+      # Subdirectorio deliberado: ver nota de persistencia en la cabecera.
+      PGDATA: /var/lib/postgresql/data/pgdata
+      # Checksums de página: detecta corrupción silenciosa del almacenamiento.
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+      TZ: UTC
+    command:
+      - postgres
+      - -c
+      - max_connections=${CEIBA_PG_MAX_CONNECTIONS:-200}
+      - -c
+      - shared_buffers=${CEIBA_PG_SHARED_BUFFERS:-256MB}
+      - -c
+      - log_min_duration_statement=${CEIBA_PG_SLOW_MS:-500}
+      - -c
+      - log_connections=on
+      - -c
+      - log_disconnections=on
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      data: {}
+    # Sin `ports:`. §21: «No expongas PostgreSQL ni Redis directamente a
+    # Internet». Para depurar desde el host, usa un túnel efímero:
+    #   docker compose -f infra/compose.yaml exec postgres psql -U ceiba ceiba
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"${POSTGRES_USER:-ceiba}\" -d \"${POSTGRES_DB:-ceiba}\" -h 127.0.0.1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    stop_grace_period: 1m
+    shm_size: ${CEIBA_PG_SHM_SIZE:-256mb}
+    logging: *logging
+    deploy:
+      resources:
+        limits:
+          cpus: "${CEIBA_PG_CPUS:-2.0}"
+          memory: ${CEIBA_PG_MEMORY:-2g}
+
+  # =========================================================================
+  # Redis — caché, colas BullMQ y coordinación de Socket.IO (ADR-0005)
+  # =========================================================================
+  redis:
+    image: ${CEIBA_REDIS_IMAGE:-redis:7.4-alpine}
+    container_name: ceiba-redis
+    restart: unless-stopped
+    <<: *image-hardening
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --save
+      - "900 1"
+      - --save
+      - "300 10"
+      - --maxmemory
+      - ${CEIBA_REDIS_MAXMEMORY:-512mb}
+      # `noeviction`: BullMQ pierde trabajos si Redis desaloja claves de cola.
+      # No lo cambies a allkeys-lru sin separar caché y colas en dos instancias.
+      - --maxmemory-policy
+      - noeviction
+    volumes:
+      - redis_data:/data
+    networks:
+      data: {}
+    # Sin `ports:`. Igual que PostgreSQL.
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+    stop_grace_period: 30s
+    logging: *logging
+    deploy:
+      resources:
+        limits:
+          cpus: "${CEIBA_REDIS_CPUS:-1.0}"
+          memory: ${CEIBA_REDIS_MEMORY:-768m}
+
+  # =========================================================================
+  # Migraciones — «automáticas controladas» (§21)
+  # =========================================================================
+  # Automáticas: la API no arranca hasta que este servicio termina en 0.
+  # Controladas: ejecuta EXCLUSIVAMENTE `prisma migrate deploy`, que es
+  # idempotente y sólo aplica migraciones ya versionadas y revisadas.
+  # `migrate dev`, `migrate reset` y `db push` NO están en ninguna imagen:
+  # el ADR-0003 los prohíbe en cualquier entorno con datos.
+  migrator:
+    image: ${CEIBA_IMAGE_PREFIX:-ceiba}/migrator:${CEIBA_IMAGE_TAG:-dev}
+    build:
+      context: ..
+      dockerfile: infra/docker/migrator.Dockerfile
+    container_name: ceiba-migrator
+    # One-shot. No se reinicia: una migración que falla debe PARAR el despliegue.
+    restart: "no"
+    <<: *node-hardening
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      DATABASE_URL: "${DATABASE_URL:?DATABASE_URL es obligatorio}"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Con `read_only: true`, el CLI de Prisma no puede escribir su caché ni
+      # su telemetría en $HOME. Se desactivan y se redirige la caché a tmpfs,
+      # en vez de darle permiso de escritura al sistema de ficheros raíz.
+      CHECKPOINT_DISABLE: "1"
+      PRISMA_HIDE_UPDATE_MESSAGE: "1"
+      XDG_CACHE_HOME: /tmp/.cache
+      HOME: /tmp
+    tmpfs:
+      # Sin `noexec`: Prisma puede necesitar extraer y ejecutar un binario de
+      # motor desde un temporal. En `api` y `engine` sí se mantiene `noexec`.
+      - /tmp:rw,nosuid,size=128m
+    networks:
+      data: {}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging: *logging
+    deploy:
+      resources:
+        limits:
+          cpus: "${CEIBA_MIGRATOR_CPUS:-1.0}"
+          memory: ${CEIBA_MIGRATOR_MEMORY:-512m}
+
+  # =========================================================================
+  # API — NestJS sobre adaptador Fastify (ADR-0001)
+  # =========================================================================
+  api:
+    image: ${CEIBA_IMAGE_PREFIX:-ceiba}/api:${CEIBA_IMAGE_TAG:-dev}
+    build:
+      context: ..
+      dockerfile: infra/docker/api.Dockerfile
+    container_name: ceiba-api
+    restart: unless-stopped
+    <<: *node-hardening
+    # La API sí usa env_file: necesita la base de datos, la clave maestra y el
+    # resto de la configuración. El motor NO. Esa asimetría es la decisión C-25.
+    env_file:
+      - path: ../.env
+        required: true
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      CEIBA_API_PORT: ${CEIBA_API_PORT:-3000}
+      # Detrás de Nginx: sin esto, `Secure` y la IP real del cliente se pierden
+      # y las cookies de C-31 no se emiten.
+      #
+      # El ADR-0009 §6.1 es explícito: `trustProxy` se acota a la RED DEL
+      # PROXY, **nunca** `true`. Con `true`, cualquiera puede falsificar
+      # `X-Forwarded-For`, evadir el límite por IP de C-CODE-03 y envenenar la
+      # auditoría. Por eso aquí viaja un CIDR, no un booleano, y por eso la red
+      # `edge` tiene subred fija: para que este valor sea comprobable.
+      CEIBA_TRUSTED_PROXIES: ${CEIBA_TRUSTED_PROXIES:-${CEIBA_EDGE_SUBNET:-172.31.241.0/24}}
+      CEIBA_UPLOAD_DIR: ${CEIBA_UPLOAD_DIR:-/var/lib/ceiba/uploads}
+      CEIBA_ENGINE_URL: ${CEIBA_ENGINE_URL:-http://engine:3001}
+    volumes:
+      - api_uploads:${CEIBA_UPLOAD_DIR:-/var/lib/ceiba/uploads}
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+    networks:
+      edge:
+        priority: 100
+      data:
+        priority: 50
+      engine_link:
+        priority: 10
+    # Sin `ports:`: sólo se llega a la API a través de Nginx. Para depurar en
+    # local, descomenta y publica en loopback, nunca en 0.0.0.0:
+    #   ports:
+    #     - "127.0.0.1:3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrator:
+        condition: service_completed_successfully
+      engine:
+        condition: service_healthy
+    healthcheck:
+      # Imagen sin curl ni wget a propósito (superficie mínima). Node basta.
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:'+(process.env.CEIBA_API_PORT||3000)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 90s
+    stop_grace_period: 30s
+    logging: *logging
+    deploy:
+      resources:
+        limits:
+          cpus: "${CEIBA_API_CPUS:-2.0}"
+          memory: ${CEIBA_API_MEMORY:-1g}
+
+  # =========================================================================
+  # MOTOR DE EJECUCIÓN HTTP — el servicio aislado de la decisión C-25
+  # =========================================================================
+  # LEE ESTO ANTES DE TOCAR NADA AQUÍ:
+  #
+  #   1. PROHIBIDO `env_file`. Las variables se enumeran una a una, siempre.
+  #   2. PROHIBIDO añadir DATABASE_URL, POSTGRES_*, REDIS_URL,
+  #      CEIBA_SECRETS_MASTER_KEY, CEIBA_JWT_SECRET o CEIBA_SHARE_CODE_PEPPER.
+  #   3. PROHIBIDO conectar este servicio a la red `data`.
+  #   4. PROHIBIDO montarle `/var/run/docker.sock` (C-SSRF-03: un socket UNIX
+  #      alcanzable convierte el SSRF en ejecución de comandos en el host).
+  #   5. PROHIBIDO publicarlo al host. Sólo lo habla la API, por `engine_link`.
+  #
+  # Las cinco las comprueba `infra/scripts/check-engine-isolation.mjs`, que se
+  # ejecuta en CI y falla el build. Si rompes una, el pipeline se pone en rojo.
+  engine:
+    image: ${CEIBA_IMAGE_PREFIX:-ceiba}/engine:${CEIBA_IMAGE_TAG:-dev}
+    build:
+      context: ..
+      dockerfile: infra/docker/engine.Dockerfile
+    container_name: ceiba-engine
+    restart: unless-stopped
+    <<: *node-hardening
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      CEIBA_ENGINE_PORT: ${CEIBA_ENGINE_PORT:-3001}
+      # Testigo compartido API→motor. El motor rechaza toda petición sin él.
+      CEIBA_ENGINE_TOKEN: "${CEIBA_ENGINE_TOKEN:?CEIBA_ENGINE_TOKEN es obligatorio; el motor debe rechazar toda peticion sin el}"
+      CEIBA_SSRF_PROTECTION: ${CEIBA_SSRF_PROTECTION:-on}
+      CEIBA_ENGINE_MAX_RESPONSE_BYTES: ${CEIBA_ENGINE_MAX_RESPONSE_BYTES:-26214400}
+      CEIBA_ENGINE_TIMEOUT_MS: ${CEIBA_ENGINE_TIMEOUT_MS:-30000}
+      CEIBA_ENGINE_MAX_REDIRECTS: ${CEIBA_ENGINE_MAX_REDIRECTS:-5}
+      # C-SSRF-10: `undici` lee HTTP_PROXY/HTTPS_PROXY del entorno. Con un proxy
+      # delante, la política de destino se evaluaría contra el proxy y no contra
+      # el destino real. Se neutralizan explícitamente; vacío no es lo mismo que
+      # ausente cuando el host inyecta variables de entorno.
+      # La lista tiene que coincidir con PROXY_ENV_VARS del motor
+      # (apps/engine/src/net/guarded-dispatcher.ts), ALL_PROXY incluido.
+      # Vacío es seguro: el motor sólo aborta con variables de proxy NO vacías.
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      ALL_PROXY: ""
+      all_proxy: ""
+      NO_PROXY: "*"
+      no_proxy: "*"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    networks:
+      # Única salida arbitraria a Internet del sistema (ADR-0002, regla 4).
+      engine_egress:
+        priority: 100
+      # Canal con la API. Interna: no da salida.
+      engine_link:
+        priority: 10
+    # Sin `ports:`. Nunca. Y tampoco aparece en la configuración de Nginx.
+    healthcheck:
+      # `/healthz` es la única ruta sin autenticación del motor (ADR-0002) y no
+      # toca la red de salida.
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:'+(process.env.CEIBA_ENGINE_PORT||3001)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 45s
+    stop_grace_period: 45s
+    ulimits:
+      nofile:
+        soft: 8192
+        hard: 16384
+    logging: *logging
+    deploy:
+      resources:
+        limits:
+          # Límites más apretados que la API a propósito: este proceso ejecuta
+          # entrada hostil y puede recibir respuestas de 25 MB (ADR-0002 §2).
+          cpus: "${CEIBA_ENGINE_CPUS:-1.5}"
+          memory: ${CEIBA_ENGINE_MEMORY:-768m}
+          pids: ${CEIBA_ENGINE_PIDS:-256}
+
+  # =========================================================================
+  # Frontend — SPA de Vue 3 ya construida, servida por Nginx
+  # =========================================================================
+  web:
+    image: ${CEIBA_IMAGE_PREFIX:-ceiba}/web:${CEIBA_IMAGE_TAG:-dev}
+    build:
+      context: ..
+      dockerfile: infra/docker/web.Dockerfile
+      args:
+        # La SPA se construye contra rutas relativas (`/api`), así que el mismo
+        # artefacto sirve para cualquier dominio. Ver DESPLIEGUE.md §5.
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api}
+    container_name: ceiba-web
+    restart: unless-stopped
+    <<: *image-hardening
+    networks:
+      edge: {}
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging: *logging
+    deploy:
+      resources:
+        limits:
+          cpus: "${CEIBA_WEB_CPUS:-0.5}"
+          memory: ${CEIBA_WEB_MEMORY:-128m}
+
+  # =========================================================================
+  # Nginx — proxy inverso, terminación TLS y WebSocket (C-31 + ADR-0005)
+  # =========================================================================
+  proxy:
+    image: ${CEIBA_IMAGE_PREFIX:-ceiba}/proxy:${CEIBA_IMAGE_TAG:-dev}
+    build:
+      context: ..
+      dockerfile: infra/docker/proxy.Dockerfile
+    container_name: ceiba-proxy
+    restart: unless-stopped
+    <<: *image-hardening
+    environment:
+      TZ: UTC
+    ports:
+      - "${CEIBA_HTTP_PORT:-8080}:8080"
+      - "${CEIBA_HTTPS_PORT:-8443}:8443"
+    volumes:
+      # Certificados montados, NUNCA horneados en la imagen (§21: «No guardes
+      # secretos reales en el repositorio»). Para desarrollo:
+      #   ./infra/scripts/generate-dev-certs.sh     (escribe en <raíz>/tls)
+      #
+      # `../tls` y NO `./tls`: con `-f infra/compose.yaml` el directorio de
+      # proyecto es `infra/`, y las rutas relativas se resuelven contra él
+      # —exactamente igual que `env_file: ../.env` unas líneas más arriba—.
+      # Con `./tls` Docker crearía un `infra/tls` vacío, Nginx no encontraría
+      # el certificado y moriría con «cannot load certificate».
+      - ${CEIBA_TLS_DIR:-../tls}:/etc/nginx/tls:ro
+      # Reto HTTP-01 de ACME. `:ro` porque Nginx sólo LEE el reto; quien
+      # escribe es certbot, y debe hacerlo en este mismo volumen con nombre
+      # desde un contenedor auxiliar. Ver DESPLIEGUE.md §10.4.
+      - acme_challenge:/var/www/acme:ro
+    networks:
+      edge: {}
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    stop_grace_period: 30s
+    logging: *logging
+    deploy:
+      resources:
+        limits:
+          cpus: "${CEIBA_PROXY_CPUS:-1.0}"
+          memory: ${CEIBA_PROXY_MEMORY:-256m}
+
+# ---------------------------------------------------------------------------
+# Redes
+# ---------------------------------------------------------------------------
+networks:
+  # Ingreso. Nginx publica puertos aquí; la API los alcanza por dentro.
+  # Subred fija a propósito: es el CIDR que la API declara como proxy de
+  # confianza (`CEIBA_TRUSTED_PROXIES`, ADR-0009 §6.1). Si esto deja de ser
+  # determinista, `trustProxy` deja de ser acotable.
+  edge:
+    name: ceiba_edge
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${CEIBA_EDGE_SUBNET:-172.31.241.0/24}
+
+  # Datos. INTERNA: PostgreSQL y Redis no tienen ruta a Internet, ni Internet
+  # a ellos. Es el refuerzo de «no expongas PostgreSQL ni Redis» del §21.
+  data:
+    name: ceiba_data
+    driver: bridge
+    internal: true
+
+  # Canal API→motor. INTERNA a propósito: este cable no da salida a Internet.
+  engine_link:
+    name: ceiba_engine_link
+    driver: bridge
+    internal: true
+
+  # Salida del motor. ÚNICA red con salida arbitraria, y con subred fija para
+  # que una regla de cortafuegos del host o de la VPC pueda apuntar justo aquí.
+  engine_egress:
+    name: ceiba_engine_egress
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${CEIBA_ENGINE_SUBNET:-172.31.240.0/24}
+
+# ---------------------------------------------------------------------------
+# Volúmenes persistentes — criterio 15 del §24
+# ---------------------------------------------------------------------------
+volumes:
+  postgres_data:
+    name: ceiba_postgres_data
+  redis_data:
+    name: ceiba_redis_data
+  api_uploads:
+    name: ceiba_api_uploads
+  acme_challenge:
+    name: ceiba_acme_challenge

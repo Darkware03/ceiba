@@ -1,0 +1,424 @@
+# CEIBA API Studio — integración continua.
+#
+# ===========================================================================
+# [NO VERIFICADO] ESTE WORKFLOW NO SE HA EJECUTADO NUNCA.
+#
+# Comprobado el 2026-10-14 en el contenedor de desarrollo:
+#   · `git remote -v` no devuelve nada: el repositorio no tiene remoto.
+#   · No hay runner de CI, ni `act`, ni Docker con el que simularlo.
+# Por tanto ningún job de abajo ha corrido jamás, ni aquí ni en GitHub, y no
+# existe ninguna ejecución en verde que respalde nada de este fichero.
+#
+# Lo que SÍ se ha validado de verdad (2026-10-14, salida literal en
+# DESPLIEGUE.md §2):
+#   · la sintaxis YAML, con el parser `yaml` de npm;
+#   · el esquema de workflow de GitHub Actions, con `action-validator`;
+#   · los Dockerfiles que construye, con `hadolint 2.15.1`;
+#   · los scripts que invoca, con `shellcheck 0.11.0`;
+#   · la invariante C-25 sobre `infra/compose.yaml`, con
+#     `infra/scripts/check-engine-isolation.mjs`.
+#
+# Esto es el «mínimo aceptable» que el cliente aprobó en C-01: queda listo
+# para ejecutarse en cuanto haya remoto y runner. Nada más.
+# ===========================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+# Mínimo privilegio: ningún job de este workflow escribe en el repositorio.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # El package.json de la raíz declara engines.node >=24.15.0.
+  NODE_VERSION: "24"
+
+jobs:
+
+  # =========================================================================
+  # 1. Infraestructura — no necesita que el código de la aplicación exista
+  # =========================================================================
+  infra-lint:
+    name: Infra · lint y invariantes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Acciones fijadas por SHA de commit, no por etiqueta: una etiqueta
+      # móvil la puede reescribir quien controle el repositorio de la acción,
+      # y entonces el CI ejecuta código distinto del revisado.
+      # SHA resueltos contra la API de GitHub el 2026-10-14.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Lint de Dockerfiles (hadolint)
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+        with:
+          recursive: true
+          dockerfile: "infra/docker/*.Dockerfile"
+          config: infra/.hadolint.yaml
+          failure-threshold: warning
+
+      - name: Lint de scripts (shellcheck)
+        run: |
+          shellcheck --version
+          shellcheck --shell=bash infra/scripts/*.sh
+          shellcheck --shell=sh infra/docker/migrator-entrypoint.sh
+
+      - name: Sintaxis de la configuración de Nginx
+        run: |
+          # Se valida con el binario real, dentro de la misma imagen que usa
+          # el proxy. `nginx -t` necesita certificados, así que se generan
+          # efímeros para la comprobación.
+          docker run --rm \
+            -v "${PWD}/infra/nginx:/etc/nginx-src:ro" \
+            --entrypoint sh nginx:1.29-alpine -c '
+              set -e
+              cp /etc/nginx-src/nginx.conf /etc/nginx/nginx.conf
+              mkdir -p /etc/nginx/snippets /etc/nginx/tls /var/www/acme
+              cp /etc/nginx-src/snippets/*.conf /etc/nginx/snippets/
+              rm -f /etc/nginx/conf.d/*.conf
+              cp /etc/nginx-src/conf.d/*.conf /etc/nginx/conf.d/
+              apk add --no-cache openssl >/dev/null
+              openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+                -subj /CN=ci.invalid \
+                -keyout /etc/nginx/tls/ceiba.key -out /etc/nginx/tls/ceiba.crt >/dev/null 2>&1
+              nginx -t
+            '
+
+      - name: Preparar un .env de CI (valores desechables, nunca secretos reales)
+        run: ./infra/scripts/ci-env.sh
+
+      - name: Compose se interpreta sin errores
+        run: docker compose --env-file .env -f infra/compose.yaml config --quiet
+
+      # Esta es la comprobación que convierte la decisión C-25 del cliente en
+      # algo que una máquina impide romper. Si alguien conecta el motor a la
+      # red de datos o le pasa DATABASE_URL, este paso pone el CI en rojo.
+      - name: Aislamiento del motor HTTP (C-25 / ADR-0002)
+        run: |
+          docker compose --env-file .env -f infra/compose.yaml config --format json \
+            | node infra/scripts/check-engine-isolation.mjs
+
+  # =========================================================================
+  # 2. El motor — se instala AISLADO, con su propio lockfile
+  # =========================================================================
+  # `apps/engine` trae su `pnpm-lock.yaml` y su `pnpm-workspace.yaml` y se
+  # instala con `--ignore-workspace` (decisión del `backend-engineer` para no
+  # pelearse por el lockfile de la raíz). El job lo respeta: así las pruebas
+  # del motor corren HOY, sin depender de que exista el resto del monorepo.
+  engine:
+    name: Motor · tipos, pruebas y build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: apps/engine
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Instalar pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.1.0
+        with:
+          version: 12.11.2
+
+      - name: Instalar Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Instalación reproducible (aislada)
+        run: pnpm install --frozen-lockfile --ignore-workspace
+
+      - name: Comprobación de tipos
+        run: pnpm run typecheck
+
+      - name: Pruebas del motor y de los controles SSRF
+        run: pnpm run test:ci
+
+      - name: Build
+        run: pnpm run build
+
+      - name: El artefacto de arranque existe
+        run: test -f dist/index.js
+
+  # =========================================================================
+  # 3. Esquema de base de datos — sin PostgreSQL
+  # =========================================================================
+  # `prisma validate` y `migrate diff` no abren conexión (ADR-0003). Si el
+  # esquema cambió y nadie regeneró la migración, esto lo destapa sin motor.
+  prisma:
+    name: Esquema · validación sin base de datos
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Instalar Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # Versión EXACTA: `prisma@latest` es una release candidate (ADR-0003).
+      #
+      # Se instala en la RAÍZ del repositorio, no en un temporal: el fichero
+      # `prisma/prisma.config.ts` empieza con `import … from 'prisma/config'`,
+      # y esa importación se resuelve SUBIENDO por node_modules desde el
+      # propio fichero. Sin `<raiz>/node_modules/prisma` no resuelve.
+      # Y se usa `npm`, no `pnpm`, a propósito: este job no activa corepack,
+      # así que el campo `packageManager` de la raíz no intercepta la llamada.
+      - name: Instalar el CLI de Prisma
+        run: npm install --no-fund --no-audit --no-save prisma@7.10.0
+
+      # `--config` y no `--schema`: Prisma 7 saca la URL del `.prisma` (P1012).
+      - name: El esquema es válido
+        env:
+          DATABASE_URL: postgresql://validacion:validacion@127.0.0.1:5432/validacion
+        run: npx prisma validate --config ./prisma/prisma.config.ts
+
+  # =========================================================================
+  # 4. Resto del monorepo — sólo cuando exista el lockfile de la raíz
+  # =========================================================================
+  # Al 2026-10-14 NO hay `pnpm-lock.yaml` en la raíz, ni `apps/api`, ni
+  # `apps/web`. Este job se salta solo hasta que los haya, en vez de poner el
+  # pipeline en rojo por algo que todavía no es culpa de nadie.
+  workspace:
+    name: Monorepo · lint, tipos, pruebas y build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    if: ${{ hashFiles('pnpm-lock.yaml') != '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Sin `version:`: la toma del campo `packageManager` del package.json de
+      # la raíz, para que CI y los Dockerfiles no se desincronicen (ADR-0008).
+      - name: Instalar pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.1.0
+
+      - name: Instalar Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Instalación reproducible
+        # `--frozen-lockfile` falla si el lockfile no cuadra con los
+        # package.json. Es el criterio 1.1 del ADR-0007.
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm -r --if-present run lint
+
+      - name: Comprobación de tipos
+        run: pnpm -r --if-present run typecheck
+
+      - name: Pruebas unitarias
+        run: pnpm -r --if-present run test
+
+      - name: Build
+        run: pnpm -r --if-present run build
+
+  # =========================================================================
+  # 5. La pila completa — lo que el cliente aprobó en C-01
+  # =========================================================================
+  stack:
+    name: Pila · levantar, migrar y probar
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    needs: [infra-lint, engine, prisma]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # El job usa `pnpm` al final, para las pruebas e2e. Sin estos dos pasos
+      # correría con el Node por defecto del runner, que no cumple
+      # `engines.node >=24.15.0`, y sin `pnpm` en el PATH.
+      - name: Instalar pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.1.0
+        with:
+          version: 12.11.2
+
+      - name: Instalar Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Preparar un .env de CI (valores desechables, nunca secretos reales)
+        run: ./infra/scripts/ci-env.sh
+
+      # Escribe en `<raiz>/tls`, que es lo que compose monta como `../tls`
+      # desde su directorio de proyecto `infra/`. Ver compose.yaml, servicio
+      # `proxy`.
+      - name: Certificado TLS efímero para el proxy
+        run: CEIBA_TLS_DIR=./tls ./infra/scripts/generate-dev-certs.sh
+
+      - name: Construir las imágenes
+        run: docker compose --env-file .env -f infra/compose.yaml build
+
+      # `--wait` bloquea hasta que TODOS los healthchecks estén en verde, y
+      # falla si alguno no llega. Sin `--wait`, `up -d` devuelve en cuanto los
+      # contenedores arrancan y las pruebas corren contra servicios a medias.
+      - name: Levantar la pila
+        run: docker compose --env-file .env -f infra/compose.yaml up -d --wait --wait-timeout 300
+
+      - name: Estado de las migraciones
+        run: |
+          docker compose --env-file .env -f infra/compose.yaml \
+            logs migrator --no-color
+
+      # ---------------------------------------------------------------------
+      # Prueba de que C-25 se cumple EN EJECUCIÓN, no sólo en el YAML.
+      # ---------------------------------------------------------------------
+      # El chequeo estático demuestra que el motor no está en la red de datos.
+      # Esto demuestra que, además, no puede llegar: se intenta abrir un socket
+      # desde dentro del contenedor del motor hacia PostgreSQL y Redis, y el
+      # paso falla si alguno CONECTA.
+      - name: El motor no alcanza PostgreSQL ni Redis
+        run: |
+          docker compose --env-file .env -f infra/compose.yaml exec -T engine \
+            node -e '
+              const net = require("node:net");
+              const objetivos = [["postgres", 5432], ["redis", 6379]];
+              let fallo = 0;
+              let pendientes = objetivos.length;
+              for (const [host, port] of objetivos) {
+                const s = net.connect({ host, port });
+                s.setTimeout(5000);
+                // Un socket puede emitir "error" DESPUES de "connect", o
+                // "timeout" y "error" seguidos. Sin este cerrojo, `pendientes`
+                // bajaria de cero y el paso se quedaria colgado hasta el
+                // timeout del job.
+                let hecho = false;
+                const cierra = (msg, mal) => {
+                  if (hecho) return;
+                  hecho = true;
+                  if (mal) { console.error(msg); fallo = 1; } else { console.log(msg); }
+                  s.destroy();
+                  if (--pendientes === 0) process.exit(fallo);
+                };
+                s.on("connect", () => cierra(`C-25 ROTO: el motor CONECTA con ${host}:${port}`, true));
+                s.on("error",   () => cierra(`OK: el motor no alcanza ${host}:${port}`, false));
+                s.on("timeout", () => cierra(`OK: el motor no alcanza ${host}:${port} (timeout)`, false));
+              }
+            '
+
+      - name: El motor sí tiene salida a Internet (regla 4 del ADR-0002)
+        run: |
+          docker compose --env-file .env -f infra/compose.yaml exec -T engine \
+            node -e '
+              const net = require("node:net");
+              const s = net.connect({ host: "1.1.1.1", port: 443 });
+              s.setTimeout(8000);
+              s.on("connect", () => { console.log("OK: el motor tiene salida"); s.destroy(); process.exit(0); });
+              s.on("error",   (e) => { console.error("El motor NO tiene salida:", e.message); process.exit(1); });
+              s.on("timeout", () => { console.error("El motor NO tiene salida (timeout)"); process.exit(1); });
+            '
+
+      # ---------------------------------------------------------------------
+      # Criterio 15 del §24: «Docker conserve los datos después de reinicios».
+      # ---------------------------------------------------------------------
+      # Se escribe un dato, se reinicia la pila entera y se comprueba que
+      # sigue ahí. Es la única forma honesta de afirmar que la persistencia
+      # funciona: afirmarlo porque hay un `volumes:` en el YAML no demuestra
+      # nada.
+      - name: Los datos sobreviven a un reinicio
+        run: |
+          set -euo pipefail
+          dc() { docker compose --env-file .env -f infra/compose.yaml "$@"; }
+          PGUSER_CI=$(grep -E '^POSTGRES_USER=' .env | cut -d= -f2-)
+          PGDB_CI=$(grep -E '^POSTGRES_DB=' .env | cut -d= -f2-)
+
+          dc exec -T postgres psql -U "$PGUSER_CI" -d "$PGDB_CI" -v ON_ERROR_STOP=1 -c \
+            "CREATE TABLE IF NOT EXISTS ci_persistencia (id int primary key, marca text);"
+          dc exec -T postgres psql -U "$PGUSER_CI" -d "$PGDB_CI" -v ON_ERROR_STOP=1 -c \
+            "INSERT INTO ci_persistencia VALUES (1, 'antes-del-reinicio') ON CONFLICT (id) DO UPDATE SET marca = excluded.marca;"
+
+          dc exec -T redis redis-cli SET ci:persistencia antes-del-reinicio
+          dc exec -T redis redis-cli SAVE
+
+          echo "--- reiniciando la pila (down SIN -v, que es el caso real) ---"
+          dc down
+          dc up -d --wait --wait-timeout 300
+
+          MARCA=$(dc exec -T postgres psql -U "$PGUSER_CI" -d "$PGDB_CI" -tAc \
+            "SELECT marca FROM ci_persistencia WHERE id = 1;" | tr -d '\r')
+          echo "PostgreSQL tras el reinicio: '${MARCA}'"
+          test "$MARCA" = "antes-del-reinicio" \
+            || { echo "CRITERIO 15 INCUMPLIDO: PostgreSQL perdio los datos"; exit 1; }
+
+          RMARCA=$(dc exec -T redis redis-cli GET ci:persistencia | tr -d '\r')
+          echo "Redis tras el reinicio: '${RMARCA}'"
+          test "$RMARCA" = "antes-del-reinicio" \
+            || { echo "CRITERIO 15 INCUMPLIDO: Redis perdio los datos"; exit 1; }
+
+          dc exec -T postgres psql -U "$PGUSER_CI" -d "$PGDB_CI" -c "DROP TABLE ci_persistencia;"
+          dc exec -T redis redis-cli DEL ci:persistencia
+
+      - name: PostgreSQL y Redis no están publicados al host
+        run: |
+          set -euo pipefail
+          # Si `docker compose port` devuelve algo, el servicio está expuesto.
+          for s in postgres redis engine; do
+            if docker compose --env-file .env -f infra/compose.yaml port "$s" 5432 2>/dev/null \
+            || docker compose --env-file .env -f infra/compose.yaml port "$s" 6379 2>/dev/null \
+            || docker compose --env-file .env -f infra/compose.yaml port "$s" 3001 2>/dev/null; then
+              echo "§21 INCUMPLIDO: el servicio '$s' publica un puerto al host"
+              exit 1
+            fi
+          done
+          echo "OK: ni PostgreSQL, ni Redis, ni el motor publican puertos"
+
+      # OJO CON EL ALCANCE: esto comprueba HSTS y nosniff, que son cabeceras
+      # de respuesta del proxy. NO comprueba ninguna cookie: `Secure`,
+      # `HttpOnly` y `SameSite` los emite la API y se verificarán cuando
+      # exista `apps/api` y haya una ruta de login que ejercitar.
+      - name: El proxy responde por HTTPS con sus cabeceras de seguridad
+        run: |
+          set -euo pipefail
+          PUERTO=$(grep -E '^CEIBA_HTTPS_PORT=' .env | cut -d= -f2-)
+          # -k: el certificado de CI es autofirmado a propósito.
+          curl -ksS -D- -o /dev/null "https://localhost:${PUERTO}/healthz" | tee /tmp/cabeceras.txt
+          grep -qi '^strict-transport-security:' /tmp/cabeceras.txt
+          grep -qi '^x-content-type-options: nosniff' /tmp/cabeceras.txt
+          echo "OK: el proxy responde por HTTPS con las cabeceras de seguridad"
+
+      - name: Pruebas de extremo a extremo
+        if: ${{ hashFiles('pnpm-lock.yaml') != '' }}
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+          pnpm -r --if-present run test:e2e
+
+      - name: Logs de la pila cuando algo falla
+        if: failure()
+        run: |
+          docker compose --env-file .env -f infra/compose.yaml ps --all
+          docker compose --env-file .env -f infra/compose.yaml logs --no-color --tail 400
+
+      - name: Guardar los logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: logs-de-la-pila
+          path: |
+            /tmp/cabeceras.txt
+          if-no-files-found: ignore
+          retention-days: 7
+
+      # `down -v` SÓLO aquí: en CI los volúmenes son desechables. En cualquier
+      # máquina con datos reales, `-v` los destruye. El §21 lo prohíbe
+      # expresamente durante las actualizaciones.
+      - name: Desmontar
+        if: always()
+        run: docker compose --env-file .env -f infra/compose.yaml down -v --remove-orphans

@@ -1,0 +1,45 @@
+# CEIBA — exclusiones del contexto de build.
+#
+# BuildKit busca primero `<ruta-del-dockerfile>.dockerignore` y sólo si no
+# existe cae al `.dockerignore` de la raíz del contexto. Por eso este fichero
+# vive aquí: no hay que tocar la raíz del repositorio, que es de darkware.
+# Requiere BuildKit (por defecto en Docker >= 23 y en Compose v2).
+
+# Nunca, bajo ningún concepto, dentro de una imagen.
+.env
+.env.*
+!.env.example
+**/*.pem
+**/*.key
+**/*.crt
+**/*.p12
+infra/tls/
+tls/
+
+# Pesado e inútil: la imagen reinstala desde el lockfile.
+**/node_modules
+.git
+.github
+**/dist
+**/build
+**/coverage
+**/.turbo
+**/.vite
+**/*.tsbuildinfo
+**/playwright-report
+**/test-results
+docker-data/
+
+# Documentación y artefactos de desarrollo: no cambian la imagen, pero sí
+# invalidan la caché de capas cada vez que alguien escribe un párrafo.
+docs/
+*.md
+!README.md
+**/.DS_Store
+**/*.log
+
+# Restos de una expansion de llaves que no se expandio, en la raiz y en
+# packages/brand. No son mios (HUECO para darkware), pero no tienen por que
+# entrar en el contexto de build de cinco imagenes.
+{apps,docs,infra,fixtures}/
+**/{src,assets*

@@ -11,6 +11,19 @@ coverage/
 .env.*
 !.env.example
 
+# material criptografico: NUNCA se versiona.
+# Detectado por devops-release al escribir generate-dev-certs.sh y confirmado
+# por el orquestador con `git check-ignore`: antes de esto, un `git add` de
+# infra/tls/dev.key lo habria metido en el historico sin aviso.
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+*.csr
+infra/tls/
+certs/
+
 # artefactos locales
 *.log
 .DS_Store
