@@ -3,7 +3,22 @@
 Inventario vivo. **Regla: nada figura como hecho sin una comprobación que lo
 respalde, y lo preparado-pero-no-ejecutado se etiqueta como tal.**
 
-Última actualización: 2026-10-14 · commit base `a0e7021`
+Última actualización: 2026-10-14 · commit base `6e2120f` · **fase 1 en ejecución**
+
+## 0. Decisiones aprobadas por el cliente (vinculantes)
+
+| # | Decisión | Resolución |
+| --- | --- | --- |
+| C-01 | Entorno de verificación | Docker persistente; CI como mínimo aceptable |
+| C-02 | Orden de construcción | Motor HTTP y SSRF → organización → import/export → colaboración → compartición |
+| C-25 | Aislamiento del motor | Contenedor propio, sin credenciales de BD, sin clave maestra, contrato explícito. **Fusión prohibida** |
+| C-31 | Sesiones | Cookie `HttpOnly`/`Secure`/`SameSite=Lax`, CSRF en toda operación mutante, revocables. **Sin tokens en `localStorage`** |
+| C-23 | Variables | **Enmendada:** se conserva el modelo híbrido. Prohibida la reestructuración destructiva |
+
+> **La aprobación de C-01 no desbloquea la verificación aquí.** Comprobado el
+> 2026-10-14: no hay `docker`, ni socket, ni Compose, ni runner de CI, ni remoto
+> git, ni PostgreSQL, ni Redis. Se construye todo y se deja la CI lista; lo que
+> no se ejecute se entrega etiquetado `[NO VERIFICADO]`.
 
 ---
 
@@ -23,14 +38,16 @@ respalde, y lo preparado-pero-no-ejecutado se etiqueta como tal.**
 | `packages/brand` — marca, tokens, logo giratorio | **Verificado** | §3 |
 | Monorepo pnpm (`package.json`, `pnpm-workspace.yaml`) | **Escrito** | `pnpm install` no ejecutado todavía |
 | `.env.example` | **Escrito** | — |
+| Arquitectura y 8 ADR | **Escrito** | `bf020a3`; 901 líneas + 8 ADR verificados |
+| Esquema DBML | **Escrito y validado (solo sintaxis)** | `96bb562`; 38 tablas/36 enums/142 refs, parseo exit 0 |
+| Modelo de amenazas y controles | **Escrito** | 64 amenazas, 36 controles; 4 hallazgos reproducidos por el orquestador |
+| Backlog y alcance | **Escrito** | 97 capacidades, 40 contradicciones, 0 referencias colgantes |
+| `apps/engine` — motor HTTP + SSRF | **En curso (fase 1)** | `backend-engineer` |
+| `prisma/` — esquema y migración inicial | **En curso (fase 1)** | `database-engineer` |
+| ADR-0009 auth/sesiones/CSRF · ADR-0010 precedencia | **En curso (fase 1)** | `software-architect` |
+| `infra/` — Compose, Nginx, Dockerfiles, CI | **En curso (fase 1)** | `devops-release`; inejecutable aquí |
 | `apps/api` — backend | **No iniciado** | — |
 | `apps/web` — frontend | **No iniciado** | — |
-| `apps/engine` — motor HTTP | **No iniciado** | — |
-| Esquema de base de datos | **No iniciado** | en curso: `database-engineer` |
-| Arquitectura y ADR | **No iniciado** | en curso: `software-architect` |
-| Modelo de amenazas | **No iniciado** | en curso: `appsec-engineer` |
-| Backlog y alcance | **No iniciado** | en curso: `product-analyst` |
-| Docker / Compose / despliegue | **No iniciado** | **Bloqueado** para ejecución (§4) |
 
 ## 3. Lo que sí está verificado
 
