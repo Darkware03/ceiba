@@ -1,0 +1,28 @@
+{
+  "name": "@ceiba/brand",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Identidad visual de CEIBA API Studio: marca, tokens de diseño y logo giratorio para pantallas de carga.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./tokens.css": "./src/tokens.css",
+    "./loader.css": "./src/loader.css",
+    "./assets/*": "./assets/*"
+  },
+  "files": [
+    "src",
+    "assets"
+  ],
+  "scripts": {
+    "build:brand": "node scripts/build-brand.mjs",
+    "check:spin": "node scripts/check-spin.mjs",
+    "check:trace": "python3 scripts/verify-logo.py assets/source/ceiba-mark-on-dark.png assets/ceiba-mark.svg",
+    "test": "node scripts/check-spin.mjs",
+    "demo": "node scripts/serve-demo.mjs"
+  },
+  "peerDependencies": {
+    "vue": "^3.5.0"
+  }
+}

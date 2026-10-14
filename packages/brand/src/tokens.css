@@ -1,0 +1,128 @@
+/* CEIBA API Studio — tokens de diseño
+ * Tema oscuro por defecto, tema claro bajo [data-theme="light"].
+ * Paleta: carbón, blanco cálido (hueso) y verde salvia como único acento.
+ */
+
+:root,
+[data-theme='dark'] {
+  color-scheme: dark;
+
+  /* --- superficies --- */
+  --ceiba-bg: #0e100f;
+  --ceiba-bg-sunken: #090a0a;
+  --ceiba-surface: #161917;
+  --ceiba-surface-raised: #1d211f;
+  --ceiba-surface-overlay: #232825;
+  --ceiba-border: #2b312e;
+  --ceiba-border-strong: #3b423e;
+
+  /* --- texto --- */
+  --ceiba-text: #f3f1e7;
+  --ceiba-text-muted: #a8a99f;
+  --ceiba-text-faint: #6f726a;
+  --ceiba-text-inverse: #0e100f;
+
+  /* --- acento (verde salvia) --- */
+  --ceiba-accent: #9dbe8c;
+  --ceiba-accent-strong: #b3cfa3;
+  --ceiba-accent-dim: #6f8a62;
+  --ceiba-accent-surface: #192116;
+  --ceiba-on-accent: #0e100f;
+
+  /* --- estados --- */
+  --ceiba-success: #7fb77e;
+  --ceiba-warning: #d9b365;
+  --ceiba-danger: #d08c7a;
+  --ceiba-info: #86a7b5;
+
+  /* --- métodos HTTP (legibles sobre superficies oscuras) --- */
+  --ceiba-method-get: #86a7b5;
+  --ceiba-method-post: #9dbe8c;
+  --ceiba-method-put: #d9b365;
+  --ceiba-method-patch: #c3a9d1;
+  --ceiba-method-delete: #d08c7a;
+  --ceiba-method-head: #8f9a93;
+  --ceiba-method-options: #8f9a93;
+
+  /* --- overlay de carga --- */
+  --ceiba-loading-backdrop: rgb(14 16 15 / 82%);
+}
+
+[data-theme='light'] {
+  color-scheme: light;
+
+  --ceiba-bg: #f7f6f0;
+  --ceiba-bg-sunken: #edebe2;
+  --ceiba-surface: #ffffff;
+  --ceiba-surface-raised: #ffffff;
+  --ceiba-surface-overlay: #ffffff;
+  --ceiba-border: #dcd9cd;
+  --ceiba-border-strong: #c2bfb2;
+
+  --ceiba-text: #1a1d1b;
+  --ceiba-text-muted: #5c605a;
+  --ceiba-text-faint: #85887f;
+  --ceiba-text-inverse: #f7f6f0;
+
+  --ceiba-accent: #4f6f42;
+  --ceiba-accent-strong: #3d5a32;
+  --ceiba-accent-dim: #87a479;
+  --ceiba-accent-surface: #eaf0e5;
+  --ceiba-on-accent: #ffffff;
+
+  --ceiba-success: #3f7a3e;
+  --ceiba-warning: #8a6420;
+  --ceiba-danger: #a2452c;
+  --ceiba-info: #30606f;
+
+  --ceiba-method-get: #30606f;
+  --ceiba-method-post: #4f6f42;
+  --ceiba-method-put: #8a6420;
+  --ceiba-method-patch: #6b4e82;
+  --ceiba-method-delete: #a2452c;
+  --ceiba-method-head: #5c605a;
+  --ceiba-method-options: #5c605a;
+
+  --ceiba-loading-backdrop: rgb(247 246 240 / 86%);
+}
+
+:root {
+  /* --- tipografía --- */
+  --ceiba-font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI',
+    Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --ceiba-font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, 'SF Mono',
+    Menlo, Consolas, 'Liberation Mono', monospace;
+
+  --ceiba-text-xs: 0.75rem;
+  --ceiba-text-sm: 0.8125rem;
+  --ceiba-text-md: 0.875rem;
+  --ceiba-text-lg: 1rem;
+  --ceiba-text-xl: 1.25rem;
+  --ceiba-text-2xl: 1.5rem;
+
+  /* --- espaciado (escala de 4) --- */
+  --ceiba-space-1: 0.25rem;
+  --ceiba-space-2: 0.5rem;
+  --ceiba-space-3: 0.75rem;
+  --ceiba-space-4: 1rem;
+  --ceiba-space-5: 1.5rem;
+  --ceiba-space-6: 2rem;
+  --ceiba-space-7: 3rem;
+
+  /* --- radios y trazos --- */
+  --ceiba-radius-sm: 4px;
+  --ceiba-radius-md: 6px;
+  --ceiba-radius-lg: 10px;
+  --ceiba-radius-pill: 999px;
+  --ceiba-focus-ring: 0 0 0 2px var(--ceiba-bg), 0 0 0 4px var(--ceiba-accent);
+
+  /* --- movimiento --- */
+  --ceiba-ease: cubic-bezier(0.2, 0, 0.2, 1);
+  --ceiba-duration-fast: 120ms;
+  --ceiba-duration-base: 200ms;
+  --ceiba-spin-duration: 1.6s;
+
+  /* --- capas --- */
+  --ceiba-z-overlay: 900;
+  --ceiba-z-loading: 1000;
+}

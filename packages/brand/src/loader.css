@@ -1,0 +1,119 @@
+/* CEIBA API Studio — logo giratorio para pantallas de carga.
+ *
+ * CSS sin dependencias: sirve tanto para los componentes Vue como para el
+ * arranque en `index.html`, antes de que exista la aplicación.
+ *
+ * Marcado mínimo esperado:
+ *   <div class="ceiba-loading" role="status" aria-live="polite">
+ *     <div class="ceiba-loading__body">
+ *       <svg class="ceiba-spinner" viewBox="0 0 256 256" aria-hidden="true"> … </svg>
+ *       <p class="ceiba-loading__label">Cargando…</p>
+ *     </div>
+ *   </div>
+ */
+
+.ceiba-spinner {
+  display: block;
+  width: var(--ceiba-spinner-size, 64px);
+  height: var(--ceiba-spinner-size, 64px);
+  color: var(--ceiba-text, #f3f1e7);
+  transform-origin: 50% 50%;
+  animation: ceiba-spin var(--ceiba-spin-duration, 1.6s) var(--ceiba-ease, cubic-bezier(0.2, 0, 0.2, 1)) infinite;
+  will-change: transform;
+}
+
+.ceiba-spinner__tree {
+  fill: currentColor;
+}
+
+.ceiba-spinner__seed {
+  fill: var(--ceiba-accent, #9dbe8c);
+}
+
+/* Tamaños nombrados */
+.ceiba-spinner--xs { --ceiba-spinner-size: 16px; }
+.ceiba-spinner--sm { --ceiba-spinner-size: 24px; }
+.ceiba-spinner--md { --ceiba-spinner-size: 40px; }
+.ceiba-spinner--lg { --ceiba-spinner-size: 64px; }
+.ceiba-spinner--xl { --ceiba-spinner-size: 96px; }
+
+@keyframes ceiba-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+/* ---- Pantalla de carga a página completa ---- */
+
+.ceiba-loading {
+  position: fixed;
+  inset: 0;
+  z-index: var(--ceiba-z-loading, 1000);
+  display: grid;
+  place-items: center;
+  background: var(--ceiba-loading-backdrop, rgb(14 16 15 / 82%));
+  backdrop-filter: blur(2px);
+}
+
+/* Variante embebida: ocupa su contenedor en lugar de la ventana. */
+.ceiba-loading--inline {
+  position: absolute;
+  backdrop-filter: none;
+}
+
+/* Variante opaca para el arranque, antes de montar la aplicación. */
+.ceiba-loading--boot {
+  background: var(--ceiba-bg, #0e100f);
+  backdrop-filter: none;
+}
+
+.ceiba-loading__body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--ceiba-space-4, 1rem);
+  padding: var(--ceiba-space-5, 1.5rem);
+  text-align: center;
+}
+
+.ceiba-loading__label {
+  margin: 0;
+  color: var(--ceiba-text-muted, #a8a99f);
+  font-family: var(--ceiba-font-sans, system-ui, sans-serif);
+  font-size: var(--ceiba-text-md, 0.875rem);
+  letter-spacing: 0.01em;
+}
+
+.ceiba-loading__detail {
+  margin: 0;
+  color: var(--ceiba-text-faint, #6f726a);
+  font-family: var(--ceiba-font-mono, ui-monospace, monospace);
+  font-size: var(--ceiba-text-xs, 0.75rem);
+  max-width: 38ch;
+}
+
+/* ---- Accesibilidad: respetar la preferencia de movimiento reducido ----
+ * No se elimina la señal de actividad: se sustituye el giro continuo por una
+ * pulsación suave de la semilla, que no produce movimiento rotatorio.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .ceiba-spinner {
+    animation: none;
+  }
+
+  .ceiba-spinner__seed {
+    animation: ceiba-seed-pulse 1.8s ease-in-out infinite;
+    transform-box: fill-box;
+    transform-origin: 50% 50%;
+  }
+
+  @keyframes ceiba-seed-pulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.25; }
+  }
+}
+
+/* Clase de escape para forzar la detención del giro (p. ej. en capturas y
+ * pruebas visuales deterministas). */
+.ceiba-spinner--static {
+  animation: none !important;
+}

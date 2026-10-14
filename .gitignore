@@ -1,0 +1,22 @@
+node_modules/
+dist/
+build/
+coverage/
+.turbo/
+.vite/
+*.tsbuildinfo
+
+# entorno: nunca se versionan secretos reales
+.env
+.env.*
+!.env.example
+
+# artefactos locales
+*.log
+.DS_Store
+/tmp/
+playwright-report/
+test-results/
+
+# datos de desarrollo
+docker-data/

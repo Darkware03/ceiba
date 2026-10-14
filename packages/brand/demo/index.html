@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="es" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CEIBA API Studio — marca y pantallas de carga</title>
+    <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+    <link rel="stylesheet" href="../src/tokens.css" />
+    <link rel="stylesheet" href="../src/loader.css" />
+    <style>
+      body {
+        margin: 0;
+        background: var(--ceiba-bg);
+        color: var(--ceiba-text);
+        font-family: var(--ceiba-font-sans);
+        font-size: var(--ceiba-text-md);
+      }
+      header {
+        padding: var(--ceiba-space-5) var(--ceiba-space-6);
+        border-bottom: 1px solid var(--ceiba-border);
+        display: flex;
+        align-items: center;
+        gap: var(--ceiba-space-3);
+      }
+      h1 { font-size: var(--ceiba-text-xl); margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+      h1 small { color: var(--ceiba-text-muted); font-weight: 400; font-size: var(--ceiba-text-md); }
+      main { padding: var(--ceiba-space-6); display: grid; gap: var(--ceiba-space-6); }
+      section { display: grid; gap: var(--ceiba-space-4); }
+      h2 {
+        font-size: var(--ceiba-text-sm); margin: 0; text-transform: uppercase;
+        letter-spacing: 0.08em; color: var(--ceiba-text-faint); font-weight: 600;
+      }
+      .row { display: flex; align-items: flex-end; gap: var(--ceiba-space-6); flex-wrap: wrap; }
+      .cell { display: grid; justify-items: center; gap: var(--ceiba-space-2); }
+      .cell code { color: var(--ceiba-text-faint); font-family: var(--ceiba-font-mono); font-size: var(--ceiba-text-xs); }
+      .panel {
+        position: relative; min-height: 220px; border: 1px solid var(--ceiba-border);
+        border-radius: var(--ceiba-radius-lg); background: var(--ceiba-surface); overflow: hidden;
+      }
+      .panel__content { padding: var(--ceiba-space-4); color: var(--ceiba-text-faint); font-family: var(--ceiba-font-mono); font-size: var(--ceiba-text-xs); }
+      .swatches { display: flex; gap: var(--ceiba-space-2); flex-wrap: wrap; }
+      .swatch { width: 92px; border: 1px solid var(--ceiba-border); border-radius: var(--ceiba-radius-md); overflow: hidden; }
+      .swatch i { display: block; height: 44px; }
+      .swatch span { display: block; padding: 6px 8px; font-family: var(--ceiba-font-mono); font-size: 10px; color: var(--ceiba-text-muted); }
+      .light-demo { background: #f7f6f0; border-radius: var(--ceiba-radius-lg); padding: var(--ceiba-space-5); }
+    </style>
+  </head>
+  <body>
+    <header>
+      <svg class="ceiba-spinner ceiba-spinner--sm ceiba-spinner--static" viewBox="0 0 256 256" aria-hidden="true"></svg>
+      <h1>CEIBA API Studio <small>— marca y pantallas de carga</small></h1>
+    </header>
+
+    <main>
+      <section>
+        <h2>Logo giratorio — tamaños</h2>
+        <div class="row" id="sizes"></div>
+      </section>
+
+      <section>
+        <h2>Pantalla de carga embebida (inline)</h2>
+        <div class="panel">
+          <div class="panel__content">GET {{base_url}}/v1/collections …</div>
+          <div class="ceiba-loading ceiba-loading--inline" role="status" aria-live="polite">
+            <div class="ceiba-loading__body">
+              <svg class="ceiba-spinner ceiba-spinner--lg" viewBox="0 0 256 256" aria-hidden="true"></svg>
+              <p class="ceiba-loading__label">Ejecutando colección…</p>
+              <p class="ceiba-loading__detail">12 / 48 solicitudes · entorno «staging»</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h2>Tema claro</h2>
+        <div class="light-demo" data-theme="light">
+          <div class="ceiba-loading__body">
+            <svg class="ceiba-spinner ceiba-spinner--lg" viewBox="0 0 256 256" aria-hidden="true"></svg>
+            <p class="ceiba-loading__label">Cargando workspace…</p>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h2>Paleta</h2>
+        <div class="swatches" id="swatches"></div>
+      </section>
+    </main>
+
+    <script type="module">
+      import {
+        CEIBA_TREE_PATH,
+        CEIBA_SEED_PATH,
+        CEIBA_SPIN_TRANSFORM,
+        CEIBA_COLORS,
+      } from '../src/mark-path.js';
+
+      // El <g> con CEIBA_SPIN_TRANSFORM evita que las puntas se recorten al girar.
+      const markup = `<g transform="${CEIBA_SPIN_TRANSFORM}">
+          <path class="ceiba-spinner__tree" fill-rule="evenodd" d="${CEIBA_TREE_PATH}"/>
+          <path class="ceiba-spinner__seed" d="${CEIBA_SEED_PATH}"/>
+        </g>`;
+
+      for (const svg of document.querySelectorAll('svg.ceiba-spinner')) {
+        svg.innerHTML = markup;
+      }
+
+      const sizes = ['xs', 'sm', 'md', 'lg', 'xl'];
+      document.getElementById('sizes').innerHTML = sizes
+        .map(
+          (s) => `<div class="cell">
+            <svg class="ceiba-spinner ceiba-spinner--${s}" viewBox="0 0 256 256" aria-hidden="true">${markup}</svg>
+            <code>${s}</code></div>`,
+        )
+        .join('');
+
+      const vars = [
+        '--ceiba-bg', '--ceiba-surface', '--ceiba-border',
+        '--ceiba-text', '--ceiba-text-muted', '--ceiba-accent',
+        '--ceiba-accent-dim', '--ceiba-warning', '--ceiba-danger',
+      ];
+      document.getElementById('swatches').innerHTML = vars
+        .map((v) => `<div class="swatch"><i style="background:var(${v})"></i><span>${v.replace('--ceiba-', '')}</span></div>`)
+        .join('');
+
+      globalThis.__ceibaBrand = { colors: CEIBA_COLORS, treeLen: CEIBA_TREE_PATH.length };
+    </script>
+  </body>
+</html>
