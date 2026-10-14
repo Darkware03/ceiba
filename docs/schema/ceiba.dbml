@@ -66,11 +66,33 @@ Enum membership_status {
   removed
 }
 
+// ADR-0009 (HUECO 1). Rol de ambito INSTALACION, disjunto de workspace_role.
+// No se anade a workspace_role a proposito: un rol de workspace se resuelve
+// contra workspace_members (workspace_id, user_id) y SIEMPRE esta acotado a un
+// workspace; el administrador de plataforma NO tiene workspace, y meterlo en
+// esa enumeracion haria que la matriz rol x operacion del ADR-0009 7.5 dejara
+// de ser cerrada. Un solo valor hoy: no invento roles que nadie ha pedido.
+// Anadir mas es ALTER TYPE ... ADD VALUE, que es aditivo.
+Enum platform_role {
+  platform_admin [note: 'Administrador de la INSTANCIA, no de un workspace. Unico principal que escribe scoped_variables con scope=global y que autoriza destinos de egreso (C-SSRF-11). No concede por si mismo ningun permiso dentro de un workspace.']
+}
+
 Enum invitation_status {
   pending
   accepted
   revoked
   expired
+}
+
+// ADR-0009 (HUECOS 2 y 4). Proposito del testigo de un solo uso de
+// user_auth_tokens. Los tres comparten exactamente el mismo ciclo de vida
+// (emitir -> entregar fuera de banda -> consumir una vez -> caducar), y el
+// propio ADR-0009 dice del reto de 2FA que es "el mismo patron que el
+// restablecimiento de contrasena". Por eso una tabla y no tres.
+Enum auth_token_purpose {
+  email_verification [note: 'Confirma que el buzon de user_auth_tokens.target_email pertenece al usuario. Al consumirse escribe users.email_verified_at.']
+  password_reset     [note: 'Permite fijar una contrasena nueva sin conocer la anterior. Al consumirse revoca todas las sesiones del usuario (ADR-0009 8).']
+  mfa_challenge      [note: 'Reto de corta vida entre la contrasena correcta y la sesion cuando mfa_enabled. NO es una sesion a medias: sessions solo recibe fila tras validar el TOTP (ADR-0009 8).']
 }
 
 Enum lifecycle_status {
@@ -436,6 +458,223 @@ Table sessions {
   fila y evita el timing leak de comparar hashes con ==.
   Indice parcial real: ... ON sessions (user_id) WHERE revoked_at IS NULL.
   Purga: borrado FISICO de filas con absolute_expires_at < now() - 30 dias.
+  '''
+}
+
+// --- HUECO 1 del ADR-0009: administrador de plataforma ----------------------
+Table platform_admins {
+  id uuid [pk, default: `uuidv7()`]
+  user_id uuid [not null]
+  role platform_role [not null, default: 'platform_admin']
+  granted_by_user_id uuid [note: 'NULL en la concesion de arranque (semilla de instalacion, sin concedente) Y TAMBIEN si el concedente se borra despues: la FK es ON DELETE SET NULL. Los dos casos son indistinguibles en esta fila; la procedencia duradera vive en audit_logs, que sobrevive al borrado del actor por target_label.']
+  granted_reason text [note: 'Por que se concedio. Exigido por el procedimiento, no por el tipo: el CHECK no puede medir si el texto es util.']
+  granted_at timestamptz [not null, default: `now()`]
+  expires_at timestamptz [note: 'NULL = sin caducidad. Permite elevacion temporal con devolucion automatica del privilegio.']
+  revoked_at timestamptz
+  revoked_by_user_id uuid
+  revoked_reason text
+
+  Indexes {
+    (user_id, role) [unique, name: 'uq_platform_admin_user_role']
+    (role, revoked_at) [name: 'ix_platform_admin_role_revoked', note: 'Enumerar administradores vivos. Honestamente: hoy `role` tiene UN solo valor, asi que su selectividad es 1 y el indice aporta poco sobre una tabla que tendra decenas de filas. Se mantiene porque el acceso "listame los administradores" es el unico que no cubre el unico, y porque si el enum crece pasa a discriminar sin migracion.']
+    expires_at [name: 'ix_platform_admin_expiry']
+  }
+  Note: '''
+  CIERRA EL HUECO 1 DEL ADR-0009. Dos sitios exigian este rol y ninguno lo
+  tenia: `variable_scope.global` ("Solo administradores de plataforma") y
+  C-SSRF-11 ("rol de administrador de la instancia, no propietario de
+  workspace"). Mientras no existio, ambas capacidades eran INALCANZABLES.
+
+  POR QUE UNA TABLA Y NO UNA COLUMNA EN `users`:
+   1. Procedencia. En este esquema ningun privilegio existe sin saber quien lo
+      dio y cuando: workspace_members.invited_by_user_id, shared_links.
+      revoked_by_user_id, share_access_codes.revoked_by_user_id. Un booleano en
+      `users` seria el unico privilegio del producto sin rastro de concesion, y
+      ademas el mas peligroso de todos.
+   2. Simetria con la tabla de autorizacion canonica. El ADR-0009 7.4 resuelve
+      TODO permiso leyendo una fila de pertenencia con estado
+      (workspace_members). Esta tabla es esa misma forma a nivel de instancia,
+      asi que el guard declarativo es el mismo objeto con otro puerto.
+   3. Revocacion y caducidad. `revoked_at` y `expires_at` son columnas; en un
+      booleano son historia perdida.
+   4. Riesgo de cambio. Anadir una tabla no toca `users`, que es la tabla mas
+      caliente del esquema y contra la que hay dos agentes escribiendo codigo
+      ahora mismo. C-23 prohibe reestructurar: crear es mas seguro que alterar.
+
+  COMO SE EVALUA (no viaja en la cookie, igual que el rol de workspace):
+    SELECT 1 FROM platform_admins
+     WHERE user_id = :usuario AND role = 'platform_admin'
+       AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now());
+  Se revalida en cada operacion, como exige la seccion 5 del prompt maestro.
+
+  Indice unico PARCIAL real (DBML no expresa el predicado):
+    CREATE UNIQUE INDEX uq_platform_admin_user_role ON platform_admins
+      (user_id, role) WHERE revoked_at IS NULL;
+  Sin el predicado, revocar un administrador impediria volver a nombrarlo.
+  OJO, y esto hay que leerlo antes de implementar la renovacion: una concesion
+  CADUCADA (expires_at < now()) pero no revocada SIGUE ocupando el unico. Para
+  volver a conceder tras una caducidad hay que escribir revoked_at primero. Es
+  deliberado —dejar caducar no es revocar, y dos filas vivas con el mismo
+  (user_id, role) harian ambigua la consulta de autorizacion— pero tiene un
+  coste: en la auditoria, esa revocacion es administrativa, no una decision
+  humana de retirar el privilegio. Conviene distinguirlas en revoked_reason
+  ('expired' frente a 'admin_revoked').
+
+  CHECK ck_platform_admin_expiry: expires_at IS NULL OR expires_at > granted_at.
+  CHECK ck_platform_admin_revoked: revoked_at IS NOT NULL
+     OR (revoked_by_user_id IS NULL AND revoked_reason IS NULL).
+  CHECK ck_platform_admin_not_self: granted_by_user_id IS NULL
+     OR granted_by_user_id <> user_id.   -- separacion de funciones
+  El tercero es PROPUESTA MIA, no requisito citado: impide que un
+  administrador se renueve a si mismo el privilegio. La concesion de arranque
+  lleva granted_by_user_id NULL y por eso no choca con el.
+
+  LO QUE ESTA TABLA NO HACE: no concede ningun permiso dentro de un workspace.
+  Un administrador de plataforma que no sea miembro de un workspace sigue sin
+  leer sus colecciones. Ninguna celda de la matriz del ADR-0009 7.5 cambia de
+  valor.
+
+  PERO SI CAMBIA EL ESTATUS DE LA MATRIZ, y seria deshonesto no decirlo. La
+  7.5 se declara "lista de permitidos: lo que no esta, se deniega", y su ultima
+  fila ("Escribir variables de ambito global: X para los cinco roles") se
+  explicaba con "ese rol no existe en el esquema; hasta que exista, la
+  escritura global no es alcanzable". Ya existe. Hay por tanto un principal
+  con una capacidad que la matriz no enumera, asi que la matriz dejo de ser
+  cerrada: le falta una columna. Anadirla es del software-architect, no mia.
+  Va como HUECO.
+
+  LO QUE FALTA PARA QUE ESTO SEA ALCANZABLE DE VERDAD, dicho sin vender la
+  tabla de mas: el ADR-0009 7.3 declara UN solo puerto,
+  WorkspaceAuthorizationPort, y el guard resuelve contra workspace_members.
+  Un administrador de plataforma no tiene workspace, asi que cae fuera de esa
+  maquinaria: hacen falta un PlatformAuthorizationPort y un decorador
+  @RequirePlatformRole que nadie ha decidido todavia. Esta tabla pone el dato;
+  NO pone el punto de evaluacion.
+
+  Y FALTA LA CERRADURA DE C-SSRF-11: el control nombra la tabla
+  `EgressAllowRule` como el sitio donde viven las excepciones de egreso, y esa
+  tabla NO EXISTE en este esquema. Con platform_admins se ha creado la llave;
+  sin EgressAllowRule sigue sin haber puerta. Va como HUECO, y es del mismo
+  ambito B.
+  '''
+}
+
+// --- HUECOS 2 y 4 del ADR-0009: testigos de un solo uso ---------------------
+Table user_auth_tokens {
+  id uuid [pk, default: `uuidv7()`]
+  user_id uuid [not null]
+  purpose auth_token_purpose [not null]
+  token_selector text [not null, note: 'Mitad publica del testigo (128 bits de CSPRNG). Indexable, NO secreta. Mismo patron que sessions e invitations. Unico POR PROPOSITO, no global: ver uq_authtoken_selector.']
+  token_verifier_hash bytea [not null, note: 'SHA-256(purpose || ":" || verificador), verificador de 256 bits. El testigo en claro NO se guarda jamas.']
+  target_email citext [note: 'Obligatorio solo en email_verification: el testigo confirma UNA direccion concreta, no "el correo que users.email tenga al abrirlo".']
+  issued_at timestamptz [not null, default: `now()`]
+  expires_at timestamptz [not null, note: 'Corta vida. Orientacion: 24 h verificacion, 30 min restablecimiento, 5 min reto 2FA. El valor lo fija la aplicacion; el esquema solo exige que exista.']
+  consumed_at timestamptz [note: 'Un solo uso. Una vez puesto, el testigo no vuelve a validar.']
+  revoked_at timestamptz
+  revoked_reason text [note: 'superseded | password_changed | email_changed | user_deactivated | admin_revoked | max_attempts.']
+  attempt_count integer [not null, default: 0, note: 'Intentos fallidos contra ESTE testigo. Solo lo usa mfa_challenge: el TOTP son 6 digitos y sin contador es forzable.']
+  max_attempts integer [not null, default: 5]
+  locked_until timestamptz
+  client_ip inet [note: 'IP que pidio el testigo. Permite limitar por IP el envio de restablecimientos (seccion 16) y correlacionar con sessions.client_ip.']
+  user_agent text [note: 'Huella del cliente que PIDIO el testigo. El ADR-0009 seccion 4 define la huella como client_ip MAS user_agent, no solo la IP: con IP sola, un reto de 2FA interceptado se canjea desde otro navegador en la misma red y nada lo detecta. Tambien alimenta sessions.user_agent y device_label al crear la sesion tras validar el TOTP (seccion 9).']
+
+  Indexes {
+    (purpose, token_selector) [unique, name: 'uq_authtoken_selector']
+    (user_id, purpose, expires_at) [name: 'ix_authtoken_user_purpose']
+    expires_at [name: 'ix_authtoken_expiry']
+  }
+  Note: '''
+  CIERRA LOS HUECOS 2 Y 4 DEL ADR-0009: restablecimiento de contrasena,
+  verificacion de correo y reto de segundo factor. Antes de esta tabla `users`
+  solo tenia `email_verified_at` y NINGUN testigo donde vivir, de modo que los
+  tres flujos eran inimplementables.
+
+  EL TESTIGO EN CLARO NO SE GUARDA. Igual que sessions, invitations y
+  share_access_codes: selector (publico, localiza la fila por indice unico) +
+  verificador hasheado (comparacion en tiempo constante). No existe en toda la
+  tabla ninguna columna que pueda contener el valor entregado al usuario.
+
+  POR QUE UNA TABLA Y NO TRES: los tres propositos tienen el MISMO ciclo de
+  vida (emitir, entregar fuera de banda, consumir una vez, caducar) y el mismo
+  modo de fallo. El propio ADR-0009 dice del reto de 2FA que es "el mismo
+  patron que el restablecimiento de contrasena". Tres tablas serian tres
+  purgas, tres indices y tres sitios donde equivocarse.
+
+  POR QUE ESO NO ABRE UN PASO ENTRE PROPOSITOS, que es el riesgo real de
+  unificar. Dos barreras, y la primera es ESTRUCTURAL:
+
+   1. `uq_authtoken_selector` es unico sobre (purpose, token_selector), NO
+      sobre token_selector a secas. La busqueda es
+        WHERE purpose = :elQueEsperaELENDPOINT AND token_selector = :selector
+      asi que un testigo de restablecimiento presentado en el endpoint de 2FA
+      sencillamente NO SE ENCUENTRA. No es una convencion de codigo: el indice
+      impone que el proposito entre en la clave de busqueda.
+   2. El verificador se hashea con separacion de dominio,
+      SHA-256(purpose || ":" || verificador), usando el proposito QUE ESPERA EL
+      ENDPOINT, nunca el que venga en la fila.
+
+  CORRECCION DE UNA VERSION ANTERIOR DE ESTA NOTA, que decia que la defensa era
+  "criptografica, no una convencion" cuando el unico era global. ERA FALSO: con
+  un unico global el selector localiza la fila sin saber el proposito, la fila
+  trae `purpose` dentro, y cualquier implementacion natural hashea con
+  `fila.purpose` -> la separacion de dominio desaparece y el hash siempre casa.
+  Lo detecto una revision independiente y la correccion es la de arriba: meter
+  el proposito en la CLAVE DE BUSQUEDA, que si es estructural. La barrera 2,
+  por si sola, sigue siendo una convencion de codigo; se mantiene porque suma.
+
+  RADIO DE IMPACTO, que es el coste honesto de unificar: un fallo en el camino
+  de consumo (olvidar `consumed_at IS NULL`, por ejemplo) rompe los tres flujos
+  a la vez en lugar de uno. Con tres tablas quedaria contenido. Se asume a
+  cambio de una sola purga, un solo juego de indices y un solo sitio donde
+  equivocarse.
+
+  POR QUE SHA-256 Y NO Argon2id: el verificador son >=256 bits de CSPRNG, no
+  hay diccionario que atacar. Es el mismo criterio que ya aplica sessions, y el
+  contrario que share_access_codes, donde el codigo SI es de baja entropia y va
+  con Argon2id. Los dos perfiles del producto son deliberados.
+
+  Indice unico PARCIAL real (DBML no expresa el predicado):
+    CREATE UNIQUE INDEX uq_authtoken_one_live ON user_auth_tokens
+      (user_id, purpose)
+      WHERE purpose IN ('email_verification', 'password_reset')
+        AND consumed_at IS NULL AND revoked_at IS NULL;
+  Un solo testigo vivo por usuario y proposito para los dos de correo: pedir
+  otro revoca el anterior, y asi no se acumulan testigos validos en el buzon.
+  mfa_challenge queda FUERA del predicado a proposito: dos inicios de sesion
+  simultanos desde dos dispositivos son legitimos y el unico los romperia.
+
+  CHECK ck_authtoken_expiry: expires_at > issued_at.
+  CHECK ck_authtoken_attempts: attempt_count >= 0 AND max_attempts > 0.
+  CHECK ck_authtoken_target:
+    (purpose = 'email_verification') = (target_email IS NOT NULL).
+  CHECK ck_authtoken_revoked: revoked_at IS NOT NULL OR revoked_reason IS NULL.
+  CHECK ck_authtoken_terminal: consumed_at IS NULL OR revoked_at IS NULL.
+
+  AVISO SOBRE ck_authtoken_terminal, porque es facil tropezar: un barrido del
+  tipo UPDATE user_auth_tokens SET revoked_at = now() WHERE user_id = :u
+  (el que manda el ADR-0009 seccion 8 al cambiar la contrasena) REVIENTA con
+  23514 si alcanza una fila ya consumida. Hay que filtrar
+  `AND consumed_at IS NULL`. El CHECK es correcto; lo que no puede faltar es
+  esta linea en quien lo use.
+
+  AVISO SOBRE uq_authtoken_one_live: dos peticiones concurrentes de
+  restablecimiento producen un 23505 en la segunda. C-CODE-04 exige que la
+  respuesta sea INDISTINGUIBLE, asi que ese error NO puede llegar al cliente:
+  la emision va en una transaccion que revoca lo vivo y despues inserta, y el
+  23505 se traduce a la misma respuesta generica que todo lo demas.
+
+  LO QUE ESTA TABLA NO RESUELVE, dicho aqui y no escondido: el ANTIRREPLAY del
+  codigo TOTP. `consumed_at` impide reutilizar EL RETO, no el codigo de 6
+  digitos dentro de su ventana de 30 s en un reto nuevo. Quien observe un TOTP
+  y tenga la contrasena puede abrir otro reto y usarlo. Hace falta guardar el
+  ultimo paso temporal consumido, y su sitio natural es `users` o `secrets`,
+  no esta tabla: es estado del FACTOR, no del reto. Va como HUECO; seria
+  ALTER TABLE users ADD COLUMN mfa_last_step bigint, aditivo, pero toca una
+  tabla preexistente y no es uno de los tres huecos encargados.
+
+  Purga: borrado FISICO de filas con expires_at < now() - 7 dias. No es
+  evidencia historica: lo que hay que auditar (quien pidio que y cuando) va a
+  audit_logs, que no caduca con el testigo.
   '''
 }
 
@@ -1352,6 +1591,129 @@ Table share_access_codes {
   '''
 }
 
+// --- HUECO 3 del ADR-0009: la tabla que C-CODE-06 especifica ----------------
+Table share_sessions {
+  id uuid [pk, default: `uuidv7()`]
+  shared_link_id uuid [not null]
+  share_access_code_id uuid [note: 'Codigo que abrio la sesion. NULL si el enlace era publico y no exigia codigo. Permite matar en bloque las sesiones de UN codigo al rotarlo.']
+  permission share_permission [not null, note: 'INSTANTANEA del permiso en el momento de validar. No es redundante: C-CODE-06 exige comprobar en cada peticion "que el permiso sigue siendo el mismo", y eso es comparar esta columna con la del enlace. Si difieren, se deniega.']
+  token_selector text [not null, note: 'Mitad publica del identificador opaco de la cookie. Indexable, NO secreta.']
+  token_verifier_hash bytea [not null, note: 'SHA-256 del verificador. Selector 128 bits + verificador 256 bits, los MISMOS tamanos que la sesion de usuario del ADR-0009 seccion 2: C-CODE-06 pide >=256 bits de identificador opaco y partir 256 en dos dejaria el secreto por debajo. El identificador en claro nunca se guarda.']
+  client_ip inet [note: 'IP del visitante. C-CODE-08 exige auditoria "con share_session_id e IP" para la ejecucion compartida, donde no hay cuenta detras, y la cuota de 10 ejecuciones/hora es POR SESION. share_access_attempts solo registra el intento de codigo, no lo que la sesion hace despues.']
+  issued_at timestamptz [not null, default: `now()`]
+  last_seen_at timestamptz [not null, default: `now()`]
+  expires_at timestamptz [not null, note: 'Obligatorio. Se evalua SIEMPRE con la hora del servidor, nunca con una fecha del cliente (C-CODE-06).']
+  revoked_at timestamptz
+  revoked_reason text [note: 'link_revoked | link_expired | code_revoked | code_rotated | permission_changed | logout | admin_revoked.']
+
+  Indexes {
+    token_selector [unique, name: 'uq_sharesession_selector']
+    (shared_link_id, revoked_at) [name: 'ix_sharesession_link']
+    share_access_code_id [name: 'ix_sharesession_code']
+    expires_at [name: 'ix_sharesession_expiry']
+  }
+  Note: '''
+  CIERRA EL HUECO 3 DEL ADR-0009. C-CODE-06 la especifica literalmente como
+  ShareSession { id, share_link_id, permission, expires_at, revoked_at } y NO
+  existia en el esquema, asi que el control no era implementable: validar un
+  codigo no tenia donde dejar el resultado.
+
+  LAS CINCO COLUMNAS DE C-CODE-06 ESTAN TODAS. `shared_link_id` lleva el
+  nombre de la tabla a la que apunta (`shared_links`), no `share_link_id`,
+  porque las otras dos tablas del bloque ya usan ese nombre exacto
+  (share_access_codes.shared_link_id, share_access_attempts.shared_link_id) y
+  una tercera grafia para la misma columna seria una trampa. El concepto es el
+  mismo.
+
+  LAS SEIS RESTANTES NO SON ADORNO:
+   - token_selector + token_verifier_hash: C-CODE-06 pide "un identificador
+     opaco de 256 bits en una cookie", y la regla no negociable del proyecto
+     es que ningun testigo se guarda en claro. Guardar el identificador de la
+     cookie tal cual convertiria un volcado de esta tabla en acceso directo a
+     todas las colecciones compartidas vivas. Mismo patron que sessions.
+   - issued_at / last_seen_at: trazabilidad y purga. OJO: aqui NO hay
+     `idle_expires_at` como en sessions, asi que la caducidad por inactividad
+     NO esta modelada; la unica caducidad dura es `expires_at`. Si se quisiera
+     inactividad, la aplicacion la calcula sobre last_seen_at o se anade la
+     columna. C-CODE-06 no la exige. last_seen_at se escribe como mucho una vez
+     cada 60 s, igual que en sessions, para no hacer un UPDATE por peticion.
+   - revoked_at / revoked_reason: la revocacion explicita que exige C-CODE-06.
+   - client_ip: atribucion de C-CODE-08.
+
+  REVOCACION EN CASCADA, QUE ES EL PUNTO DE C-CODE-06: "Revocar el enlace
+  cancela en cascada todas sus sesiones en la misma transaccion". Eso es
+  trabajo de la aplicacion (marcar revoked_at), no de la FK: ON DELETE CASCADE
+  solo actua al BORRAR la fila del enlace, y los enlaces se revocan, no se
+  borran. La FK esta en cascade por el otro motivo: si algun dia se borra de
+  verdad un enlace o un codigo, sus sesiones deben desaparecer con el, nunca
+  quedar colgando (fallo cerrado).
+    UPDATE share_sessions SET revoked_at = now(), revoked_reason = 'link_revoked'
+     WHERE shared_link_id = :enlace AND revoked_at IS NULL;
+
+  VALIDACION DE CADA PETICION (C-CODE-06, sin cache o con cache <= 5 s).
+  Siete comprobaciones, no cinco; una version anterior de esta nota se dejaba
+  dos y las anadio una revision independiente:
+   1. separar selector, buscar por uq_sharesession_selector;
+   2. comparar SHA-256(verificador) en tiempo constante;
+   3. la sesion viva: revoked_at IS NULL AND expires_at > now();
+   4. el ENLACE padre vivo: state = 'active', revoked_at IS NULL,
+      (expires_at IS NULL OR expires_at > now());
+      Nota de divergencia literal con C-CODE-06, que escribe
+      "share_link.expires_at > now()" a secas: shared_links.expires_at es
+      NULLABLE y NULL significa "sin caducidad". Se respeta el dato existente;
+      tratar NULL como caducado romperia todos los enlaces perpetuos.
+   5. el CODIGO padre vivo, si share_access_code_id no es NULL:
+      state = 'active', revoked_at IS NULL,
+      (expires_at IS NULL OR expires_at > now()).
+      Sin este paso, rotar o revocar un codigo no cerraria las sesiones que
+      abrio, que es justo para lo que se guarda share_access_code_id y lo que
+      nombran 'code_revoked' y 'code_rotated' en revoked_reason.
+   6. share_sessions.permission = shared_links.permission, Y TAMBIEN
+      shared_links.allow_execution y allow_export siguen permitiendo lo que se
+      pide: esas dos cambian el alcance real SIN tocar `permission`, asi que
+      comparar solo el permiso dejaria a una sesion exportando despues de que
+      el propietario desactivara la exportacion.
+   7. max_views: si shared_links.max_views no es NULL, view_count < max_views.
+  Cualquier fallo: la MISMA respuesta, sin decir cual de los siete fue.
+
+  ESTA TABLA NO AMPLIA LO QUE ALCANZA UN ENLACE, y conviene decir con precision
+  que significa eso, porque la formulacion facil es FALSA.
+
+  LO FALSO (y estaba escrito aqui hasta que lo verifique recorriendo el grafo):
+  "no hay ruta de FK desde aqui a secrets". SI la hay, en tres saltos:
+    share_sessions.shared_link_id   --fk_sharesession_link--> shared_links
+    shared_links.created_by_user_id --fk_share_creator-----> users
+    users.mfa_secret_id             --fk_users_mfa_secret--> secrets
+  Esa arista es el seed TOTP de quien CREO el enlace, no un recurso del
+  visitante, asi que el impacto de seguridad es nulo; pero la afirmacion era
+  falsa y comprobable. Lo mismo ocurre desde shared_links y desde collections,
+  que ya lo tenian antes de esta tabla.
+
+  LO CIERTO Y COMPROBADO, recorriendo las 148 Ref del grafo: desde
+  share_sessions son INALCANZABLES por FK saliente `environments`,
+  `environment_variables`, `scoped_variables`, `workspace_members`,
+  `auth_credentials` y `client_certificates`. Y el delta que introduce esta
+  tabla sobre lo que ya alcanzaba shared_links es UNA sola tabla:
+  share_access_codes. No abre ni una ruta nueva hacia nada sensible.
+
+  LO QUE DE VERDAD GARANTIZA C-CODE-07 NO ES LA TOPOLOGIA DE FK, es el guard
+  por recurso. Hay que decirlo porque shared_links.workspace_id esta
+  denormalizado a proposito y pone el workspace a UN salto: desde ahi, un
+  SELECT ... WHERE workspace_id = :x alcanza cualquiera de las tablas del
+  workspace. Ninguna clave foranea impide eso; lo impide la lista de permitidos
+  por verbo y recurso de C-CODE-07, que es codigo y se prueba con T-CODE-08.
+
+  CHECK ck_sharesession_expiry: expires_at > issued_at.
+  CHECK ck_sharesession_revoked: revoked_at IS NOT NULL OR revoked_reason IS NULL.
+  No hace falta ningun CHECK que impida la escritura: share_permission no
+  contiene ningun valor de edicion, igual que en shared_links.
+
+  Purga: borrado FISICO de filas con expires_at < now() - 30 dias, como
+  sessions. El rastro de acceso vive en share_access_attempts, que tiene su
+  propia retencion de 90 dias.
+  '''
+}
+
 Table share_access_attempts {
   id bigserial [pk]
   shared_link_id uuid [not null]
@@ -1885,6 +2247,19 @@ Ref fk_users_mfa_secret: users.mfa_secret_id > secrets.id [delete: set null]
 Ref fk_sessions_user: sessions.user_id > users.id [delete: cascade]
 Ref fk_sessions_parent: sessions.parent_session_id > sessions.id [delete: set null]
 
+// ADR-0009 HUECO 1. `cascade` en el titular: una concesion no tiene vida sin
+// el usuario al que eleva. `set null` en concedente y revocador: son evidencia
+// de quien tomo la decision y sobreviven al borrado del actor, exactamente el
+// mismo criterio que workspace_members.invited_by_user_id.
+Ref fk_platform_admin_user: platform_admins.user_id > users.id [delete: cascade]
+Ref fk_platform_admin_granter: platform_admins.granted_by_user_id > users.id [delete: set null]
+Ref fk_platform_admin_revoker: platform_admins.revoked_by_user_id > users.id [delete: set null]
+
+// ADR-0009 HUECOS 2 y 4. `cascade`: un testigo de un solo uso no significa
+// nada sin su usuario, y dejarlo vivo tras borrarlo seria una credencial
+// huerfana. Mismo criterio que fk_sessions_user.
+Ref fk_authtoken_user: user_auth_tokens.user_id > users.id [delete: cascade]
+
 // --- Workspaces y miembros ------------------------------------------------
 Ref fk_ws_owner: workspaces.owner_user_id > users.id [delete: restrict]
 Ref fk_ws_icon: workspaces.icon_file_id > files.id [delete: set null]
@@ -1985,6 +2360,13 @@ Ref fk_sharecode_link: share_access_codes.shared_link_id > shared_links.id [dele
 Ref fk_sharecode_rotation: share_access_codes.rotated_from_code_id > share_access_codes.id [delete: set null]
 Ref fk_sharecode_creator: share_access_codes.created_by_user_id > users.id [delete: restrict]
 Ref fk_sharecode_revoker: share_access_codes.revoked_by_user_id > users.id [delete: set null]
+// ADR-0009 HUECO 3 / C-CODE-06. Las dos en `cascade` y por el mismo motivo:
+// una sesion de comparticion no tiene vida propia sin el enlace ni sin el
+// codigo que la abrio. Si alguno se borra fisicamente, la sesion debe morir
+// con el (fallo cerrado), nunca quedar colgando con permiso vigente.
+Ref fk_sharesession_link: share_sessions.shared_link_id > shared_links.id [delete: cascade]
+Ref fk_sharesession_code: share_sessions.share_access_code_id > share_access_codes.id [delete: cascade]
+
 Ref fk_attempt_link: share_access_attempts.shared_link_id > shared_links.id [delete: cascade]
 Ref fk_attempt_code: share_access_attempts.share_access_code_id > share_access_codes.id [delete: set null]
 Ref fk_attempt_user: share_access_attempts.authenticated_user_id > users.id [delete: set null]

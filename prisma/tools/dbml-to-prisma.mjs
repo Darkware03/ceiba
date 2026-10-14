@@ -50,6 +50,8 @@ const { Parser } = require('@dbml/core');
 const MODEL_NAME = {
   users: 'User',
   sessions: 'Session',
+  platform_admins: 'PlatformAdmin',
+  user_auth_tokens: 'UserAuthToken',
   workspaces: 'Workspace',
   workspace_members: 'WorkspaceMember',
   invitations: 'Invitation',
@@ -74,6 +76,7 @@ const MODEL_NAME = {
   scoped_variables: 'ScopedVariable',
   shared_links: 'SharedLink',
   share_access_codes: 'ShareAccessCode',
+  share_sessions: 'ShareSession',
   share_access_attempts: 'ShareAccessAttempt',
   collection_versions: 'CollectionVersion',
   request_history: 'RequestHistory',
@@ -92,6 +95,8 @@ const MODEL_NAME = {
 const SINGULAR = {
   users: 'user',
   sessions: 'session',
+  platform_admins: 'platform_admin',
+  user_auth_tokens: 'user_auth_token',
   workspaces: 'workspace',
   workspace_members: 'workspace_member',
   invitations: 'invitation',
@@ -116,6 +121,7 @@ const SINGULAR = {
   scoped_variables: 'scoped_variable',
   shared_links: 'shared_link',
   share_access_codes: 'share_access_code',
+  share_sessions: 'share_session',
   share_access_attempts: 'share_access_attempt',
   collection_versions: 'collection_version',
   request_history: 'request_history_entry',
@@ -133,7 +139,8 @@ const SINGULAR = {
 // Reparto en ficheros, espejo de los BLOQUE 1..8 del DBML.
 const BLOCKS = [
   ['02-identity', 'BLOQUE 1 - Identidad, sesiones, workspaces, miembros, invitaciones',
-    ['users', 'sessions', 'workspaces', 'workspace_members', 'invitations']],
+    ['users', 'sessions', 'platform_admins', 'user_auth_tokens', 'workspaces',
+      'workspace_members', 'invitations']],
   ['03-organization', 'BLOQUE 2 - Organizacion: proyectos, colecciones, carpetas, solicitudes',
     ['projects', 'collections', 'collection_folders', 'api_requests', 'request_headers',
       'request_params', 'request_bodies', 'request_body_fields', 'tags', 'request_tags']],
@@ -142,7 +149,7 @@ const BLOCKS = [
   ['05-environments-variables', 'BLOQUE 4 - Entornos y variables (MODELO HIBRIDO, C-23: se conserva)',
     ['environments', 'environment_variables', 'variable_local_values', 'scoped_variables']],
   ['06-sharing', 'BLOQUE 5 - Comparticion publica y privada con codigo hasheado',
-    ['shared_links', 'share_access_codes', 'share_access_attempts']],
+    ['shared_links', 'share_access_codes', 'share_sessions', 'share_access_attempts']],
   ['07-versions-history', 'BLOQUE 6 - Versiones, historial y ciclo de vida de las respuestas',
     ['collection_versions', 'request_history', 'response_artifacts', 'retention_policies']],
   ['08-tests-runs', 'BLOQUE 7 - Pruebas y ejecuciones de coleccion',

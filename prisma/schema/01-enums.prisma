@@ -35,6 +35,12 @@ enum MembershipStatus {
   @@map("membership_status")
 }
 
+enum PlatformRole {
+  platform_admin // Administrador de la INSTANCIA, no de un workspace. Unico principal que escribe scoped_variables con scope=global y que autoriza destinos de egreso (C-SSRF-11). No concede por si mismo ningun permiso dentro de un workspace.
+
+  @@map("platform_role")
+}
+
 enum InvitationStatus {
   pending
   accepted
@@ -42,6 +48,14 @@ enum InvitationStatus {
   expired
 
   @@map("invitation_status")
+}
+
+enum AuthTokenPurpose {
+  email_verification // Confirma que el buzon de user_auth_tokens.target_email pertenece al usuario. Al consumirse escribe users.email_verified_at.
+  password_reset // Permite fijar una contrasena nueva sin conocer la anterior. Al consumirse revoca todas las sesiones del usuario (ADR-0009 8).
+  mfa_challenge // Reto de corta vida entre la contrasena correcta y la sesion cuando mfa_enabled. NO es una sesion a medias: sessions solo recibe fila tras validar el TOTP (ADR-0009 8).
+
+  @@map("auth_token_purpose")
 }
 
 enum LifecycleStatus {

@@ -29,8 +29,28 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const DBML_PATH = process.env.CEIBA_DBML ?? path.join(REPO_ROOT, 'docs', 'schema', 'ceiba.dbml');
-const SQL_PATH = process.env.CEIBA_SQL
-  ?? path.join(REPO_ROOT, 'prisma', 'migrations', '20261014193000_ceiba_initial_schema', 'migration.sql');
+
+// El DDL con el que se compara es la SUMA de las migraciones GENERADAS por
+// Prisma, en orden de aplicacion, no un solo fichero. Desde que el ADR-0009
+// anadio tres tablas, el esquema completo vive en dos migraciones generadas:
+// la inicial y la aditiva. Comparar solo contra la primera daria tres "TABLA
+// PERDIDA" falsas, y comparar contra un `--from-empty` recien hecho no
+// demostraria nada sobre lo que de verdad se va a aplicar.
+//
+// NO se incluyen las migraciones ESCRITAS A MANO (…192900 prerrequisitos,
+// …193100 y …213100 constraints, …193200 triggers): este verificador mide la
+// fidelidad de la TRADUCCION DBML -> Prisma, y esos ficheros son justamente lo
+// que Prisma no sabe traducir. Lo que anaden esta catalogado en
+// MODELO-DATOS-PRISMA.md.
+//
+// CEIBA_SQL admite una lista separada por comas para anular este valor.
+const DEFAULT_SQL = [
+  '20261014193000_ceiba_initial_schema',
+  '20261014213000_ceiba_adr0009_schema_gaps',
+].map((d) => path.join(REPO_ROOT, 'prisma', 'migrations', d, 'migration.sql'));
+const SQL_PATHS = process.env.CEIBA_SQL
+  ? process.env.CEIBA_SQL.split(',').map((s) => s.trim()).filter(Boolean)
+  : DEFAULT_SQL;
 
 const DBML_CORE_DIR = process.env.CEIBA_DBML_CORE ?? '/software-factory/.toolchain/dbml';
 const require = createRequire(path.join(DBML_CORE_DIR, 'package.json'));
@@ -45,11 +65,11 @@ const EXACT_TYPE = {
 // Mapeos DEGRADADOS: el tipo del DDL no es el del DBML. Cada uno debe estar
 // repuesto en prisma/sql/. Si aparece uno nuevo que no este aqui, es un fallo.
 const EXPECTED_LOSSES = {
-  citext: { ddl: 'TEXT', repair: 'migracion 20261014193100 (ALTER ... TYPE citext)' },
+  citext: { ddl: 'TEXT', repair: 'migracion complementaria (ALTER ... TYPE citext): …193100 para las 6 originales, …213100 para user_auth_tokens.target_email' },
 };
 
 const src = fs.readFileSync(DBML_PATH, 'utf8');
-const sql = fs.readFileSync(SQL_PATH, 'utf8');
+const sql = SQL_PATHS.map((p) => fs.readFileSync(p, 'utf8')).join('\n');
 const schema = Parser.parse(src, 'dbmlv2').schemas[0];
 
 const problems = [];
@@ -234,7 +254,9 @@ for (const n of sqlFks.keys()) {
 // -----------------------------------------------------------------------------
 console.log('=== VERIFICACION DE FIDELIDAD DBML -> DDL ===');
 console.log(`DBML : ${DBML_PATH}`);
-console.log(`DDL  : ${SQL_PATH}`);
+for (let i = 0; i < SQL_PATHS.length; i += 1) {
+  console.log(`DDL ${i + 1}: ${SQL_PATHS[i]}`);
+}
 console.log('');
 console.log(`tablas comparadas .......... ${schema.tables.length}  (DDL: ${sqlTables.size})`);
 console.log(`enums comparados ........... ${schema.enums.length}  (DDL: ${sqlEnums.size})`);
