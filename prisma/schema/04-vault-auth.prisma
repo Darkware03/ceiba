@@ -1,0 +1,252 @@
+// =============================================================================
+// CEIBA API Studio - BLOQUE 3 - Boveda de secretos y autenticacion
+// GENERADO por prisma/tools/dbml-to-prisma.mjs desde docs/schema/ceiba.dbml.
+// NO EDITAR A MANO.
+// =============================================================================
+
+/// Secret -> tabla `secrets`.
+/// BOVEDA. Reglas que el esquema impone y las que no puede imponer:
+///
+/// Impone el esquema:
+///  - No existe columna de valor en claro. Es imposible guardar un secreto
+///    plano sin una migracion que anada una columna nueva, y eso se ve en
+///    revision de codigo.
+///  - `aad_fingerprint` ata el criptograma a su contexto. Copiar la fila a otra
+///    coleccion produce un fallo de descifrado, no una fuga silenciosa.
+///  - La clave maestra NO esta en la base de datos: `kek_reference` es un
+///    puntero a KMS. Un volcado completo de PostgreSQL no basta para descifrar.
+///
+/// No lo impone el esquema (es responsabilidad de la aplicacion, y lo digo
+/// explicitamente en lugar de fingir que el modelo lo resuelve):
+///  - Que nadie haga SELECT ciphertext y lo saque por la API.
+///  - El control de acceso por rol al descifrado.
+///
+/// `scope_id` no lleva FK porque apunta a cinco tablas distintas segun `scope`.
+/// Alternativa descartada: cinco columnas nullables con CHECK. La descarto
+/// porque la boveda debe poder sobrevivir al borrado del recurso que la uso
+/// (para auditoria de rotacion), y un FK con CASCADE borraria evidencia.
+/// La integridad se vigila con un job de reconciliacion, documentado en
+/// MODELO-DATOS.md.
+///
+/// CHECK ck_secret_revoked: (state = 'revoked') = (revoked_at IS NOT NULL).
+/// CHECK ck_secret_notself: id <> rotated_from_secret_id.
+///
+model Secret {
+  id                  String      @id @default(uuid(7)) @db.Uuid
+  workspaceId         String      @map("workspace_id") @db.Uuid // Frontera de autorizacion y de clave de cifrado.
+  scope               SecretScope
+  scopeId             String?     @map("scope_id") @db.Uuid // Id del recurso dueno dentro del scope. Sin FK: es polimorfico a proposito, ver nota.
+  label               String // Nombre legible NO sensible, p.ej. token de staging. Es lo unico que la API devuelve.
+  ciphertext          Bytes // AEAD (AES-256-GCM o XChaCha20-Poly1305). NUNCA texto en claro.
+  nonce               Bytes
+  authTag             Bytes?      @map("auth_tag") // Separado si la libreria no lo concatena al ciphertext.
+  aadFingerprint      Bytes       @map("aad_fingerprint") // Hash de los datos asociados (workspace_id|scope|scope_id|slot). Ata el criptograma a su contexto: un secreto movido a otra coleccion no descifra.
+  kekReference        String      @map("kek_reference") // Identificador de la clave maestra en KMS / Secret Manager. Es un PUNTERO: la clave vive FUERA de la base de datos.
+  dekWrapped          Bytes?      @map("dek_wrapped") // DEK envuelta por la KEK (envelope encryption). NULL si se cifra directo con la KEK.
+  algorithm           String      @default("AES-256-GCM")
+  keyVersion          Int         @default(1) @map("key_version")
+  state               SecretState @default(active)
+  lastUsedAt          DateTime?   @map("last_used_at") @db.Timestamptz(6)
+  rotatedAt           DateTime?   @map("rotated_at") @db.Timestamptz(6)
+  rotatedFromSecretId String?     @map("rotated_from_secret_id") @db.Uuid
+  expiresAt           DateTime?   @map("expires_at") @db.Timestamptz(6) // Obligatorio para tokens OAuth cacheados.
+  revokedAt           DateTime?   @map("revoked_at") @db.Timestamptz(6)
+  createdByUserId     String?     @map("created_by_user_id") @db.Uuid
+  createdAt           DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime    @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  // --- Relaciones -------------------------------------------------------
+  createdByUser                User?                 @relation("fk_secret_creator", fields: [createdByUserId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_secret_creator")
+  rotatedFromSecret            Secret?               @relation("fk_secret_rotation", fields: [rotatedFromSecretId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_secret_rotation")
+  workspace                    Workspace             @relation("fk_secret_ws", fields: [workspaceId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_secret_ws")
+  authCredentials              AuthCredential[]      @relation("fk_authcred_secret")
+  requestBodyFields            RequestBodyField[]    @relation("fk_bodyfield_secret")
+  clientCertificatesPrivateKey ClientCertificate[]   @relation("fk_cert_key")
+  clientCertificatesPassphrase ClientCertificate[]   @relation("fk_cert_passphrase")
+  cookieJarEntries             CookieJarEntry[]      @relation("fk_cookie_secret")
+  environmentVariables         EnvironmentVariable[] @relation("fk_envvar_secret")
+  requestHeaders               RequestHeader[]       @relation("fk_header_secret")
+  requestParams                RequestParam[]        @relation("fk_param_secret")
+  scopedVariables              ScopedVariable[]      @relation("fk_scopedvar_secret")
+  rotatedToSecrets             Secret[]              @relation("fk_secret_rotation")
+  users                        User[]                @relation("fk_users_mfa_secret")
+  variableLocalValues          VariableLocalValue[]  @relation("fk_varlocal_secret")
+
+  @@index([workspaceId, scope, scopeId], map: "ix_secrets_scope")
+  @@index([state, expiresAt], map: "ix_secrets_expiry")
+  @@index([kekReference], map: "ix_secrets_kek")
+  @@index([rotatedFromSecretId], map: "ix_secrets_rotation_chain")
+  @@map("secrets")
+}
+
+/// AuthConfiguration -> tabla `auth_configurations`.
+/// LA MITAD PUBLICABLE DE LA AUTENTICACION. Contiene la FORMA del mecanismo
+/// (que flujo, contra que URL, con que nombre de cabecera) y nunca el material.
+/// Un export de coleccion PUEDE incluir estas filas sin filtrar nada: decirle a
+/// alguien que una API usa OAuth2 con PKCE contra https://auth.ejemplo/token no
+/// es una credencial.
+/// CHECK ck_authcfg_apikey: auth_type NOT IN ('api_key_header','api_key_query')
+///   OR api_key_param_name IS NOT NULL.
+/// CHECK ck_authcfg_oauth: auth_type NOT LIKE 'oauth2%' OR oauth_token_url IS NOT NULL.
+///
+model AuthConfiguration {
+  id                    String    @id @default(uuid(7)) @db.Uuid
+  workspaceId           String    @map("workspace_id") @db.Uuid
+  name                  String
+  authType              AuthType  @default(none) @map("auth_type")
+  apiKeyParamName       String?   @map("api_key_param_name") // Nombre de la cabecera o del query param. No es secreto; el valor si.
+  bearerPrefix          String    @default("Bearer") @map("bearer_prefix")
+  oauthAuthorizationUrl String?   @map("oauth_authorization_url")
+  oauthTokenUrl         String?   @map("oauth_token_url")
+  oauthRefreshUrl       String?   @map("oauth_refresh_url")
+  oauthRedirectUri      String?   @map("oauth_redirect_uri")
+  oauthScopes           String?   @map("oauth_scopes") // Lista separada por espacios. Metadato publico del flujo.
+  oauthAudience         String?   @map("oauth_audience")
+  oauthUsePkce          Boolean   @default(true) @map("oauth_use_pkce")
+  oauthPkceMethod       String    @default("S256") @map("oauth_pkce_method")
+  oauthClientAuthMethod String    @default("client_secret_post") @map("oauth_client_auth_method")
+  digestAlgorithm       String?   @map("digest_algorithm")
+  digestQop             String?   @map("digest_qop")
+  mtlsVerifyPeer        Boolean   @default(true) @map("mtls_verify_peer")
+  customScheme          String?   @map("custom_scheme") // Para auth_type = custom.
+  extraParams           Json      @default("{}") @map("extra_params") // PROHIBIDO guardar secretos aqui. Validado en aplicacion contra una lista blanca de claves.
+  createdByUserId       String?   @map("created_by_user_id") @db.Uuid
+  createdAt             DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
+  deletedAt             DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  // --- Relaciones -------------------------------------------------------
+  createdByUser     User?              @relation("fk_authcfg_creator", fields: [createdByUserId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_authcfg_creator")
+  workspace         Workspace          @relation("fk_authcfg_ws", fields: [workspaceId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_authcfg_ws")
+  authCredentials   AuthCredential[]   @relation("fk_authcred_cfg")
+  collections       Collection[]       @relation("fk_collection_auth")
+  collectionFolders CollectionFolder[] @relation("fk_folder_auth")
+  apiRequests       ApiRequest[]       @relation("fk_request_auth")
+
+  @@index([workspaceId, name], map: "ix_authcfg_ws_name")
+  @@index([authType], map: "ix_authcfg_type")
+  @@map("auth_configurations")
+}
+
+/// AuthCredential -> tabla `auth_credentials`.
+/// UNICO CAMINO ENTRE auth_configurations Y secrets.
+///
+/// Precision importante, para no afirmar de mas: esta NO es la unica arista de
+/// todo el esquema hacia `secrets`. Hay 12 claves foraneas que apuntan a
+/// `secrets` (request_headers, request_params, request_body_fields,
+/// scoped_variables, environment_variables, variable_local_values,
+/// cookie_jar_entries, client_certificates x2, users.mfa_secret_id, la cadena de
+/// rotacion y esta). Lo que SI es cierto y es lo que exige el requisito:
+///
+///  a) Ninguna fila de metadatos contiene material criptografico. Como maximo
+///     contiene un `secret_id`, y cuando lo contiene el CHECK correspondiente
+///     obliga a que la columna de texto en claro sea NULL.
+///  b) El unico camino desde `auth_configurations` (la forma publicable de la
+///     autenticacion) hasta el material es ESTA tabla.
+///  c) El conjunto de aristas hacia la boveda es cerrado, enumerable y todas sus
+///     columnas se llaman *secret_id. Eso convierte la regla de exportacion en
+///     algo mecanicamente comprobable:
+///     NINGUN serializador sigue una FK cuyo destino sea `secrets`.
+///
+/// Contrato de publicacion y exportacion, verificable con una prueba:
+/// el serializador recorre collections, collection_folders, api_requests,
+/// request_headers, request_params, request_bodies, request_body_fields y
+/// auth_configurations, emite los `secret_id` como referencias opacas o los
+/// omite, y NUNCA hace JOIN con `secrets` ni con esta tabla.
+/// (test obligatorio 18, seccion 20: los secretos no se filtran en exportaciones)
+///
+/// Si la credencial estuviera como columna en `collections` o dentro de un jsonb,
+/// no habria nada que aislar ni nada que probar.
+///
+/// `owner_user_id` resuelve el caso de la seccion 6: publicar una coleccion no
+/// puede arrastrar las credenciales PERSONALES del propietario.
+///
+model AuthCredential {
+  id                  String         @id @default(uuid(7)) @db.Uuid
+  authConfigurationId String         @map("auth_configuration_id") @db.Uuid
+  slot                CredentialSlot // Que pieza del mecanismo es: password, client_secret, access_token...
+  secretId            String         @map("secret_id") @db.Uuid
+  ownerUserId         String?        @map("owner_user_id") @db.Uuid // NULL = credencial compartida del workspace. No NULL = credencial personal, invisible para los demas miembros.
+  isShareable         Boolean        @default(false) @map("is_shareable") // Si false, ni siquiera un export autorizado del workspace la incluye.
+  expiresAt           DateTime?      @map("expires_at") @db.Timestamptz(6)
+  createdAt           DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime       @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  // --- Relaciones -------------------------------------------------------
+  authConfiguration AuthConfiguration @relation("fk_authcred_cfg", fields: [authConfigurationId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_authcred_cfg")
+  ownerUser         User?             @relation("fk_authcred_owner", fields: [ownerUserId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_authcred_owner")
+  secret            Secret            @relation("fk_authcred_secret", fields: [secretId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_authcred_secret")
+
+  @@unique([authConfigurationId, slot, ownerUserId], map: "uq_authcred_slot_owner")
+  @@index([secretId], map: "ix_authcred_secret")
+  @@index([ownerUserId], map: "ix_authcred_owner")
+  @@map("auth_credentials")
+}
+
+/// ClientCertificate -> tabla `client_certificates`.
+/// mTLS de la seccion 7. El certificado publico puede ir en `files`; la clave privada NO, va cifrada en `secrets`.
+model ClientCertificate {
+  id                 String    @id @default(uuid(7)) @db.Uuid
+  workspaceId        String    @map("workspace_id") @db.Uuid
+  name               String
+  hostPattern        String    @map("host_pattern") // Host o patron al que aplica el certificado.
+  port               Int?
+  certificateFileId  String    @map("certificate_file_id") @db.Uuid
+  privateKeySecretId String    @map("private_key_secret_id") @db.Uuid // La clave privada va a la boveda, nunca a `files` en claro.
+  passphraseSecretId String?   @map("passphrase_secret_id") @db.Uuid
+  caBundleFileId     String?   @map("ca_bundle_file_id") @db.Uuid
+  notBefore          DateTime? @map("not_before") @db.Timestamptz(6)
+  notAfter           DateTime? @map("not_after") @db.Timestamptz(6)
+  fingerprintSha256  Bytes?    @map("fingerprint_sha256")
+  createdByUserId    String?   @map("created_by_user_id") @db.Uuid
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  deletedAt          DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  // --- Relaciones -------------------------------------------------------
+  caBundleFile     File?        @relation("fk_cert_ca", fields: [caBundleFileId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_cert_ca")
+  createdByUser    User?        @relation("fk_cert_creator", fields: [createdByUserId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_cert_creator")
+  certificateFile  File         @relation("fk_cert_file", fields: [certificateFileId], references: [id], onDelete: Restrict, onUpdate: NoAction, map: "fk_cert_file")
+  privateKeySecret Secret       @relation("fk_cert_key", fields: [privateKeySecretId], references: [id], onDelete: Restrict, onUpdate: NoAction, map: "fk_cert_key")
+  passphraseSecret Secret?      @relation("fk_cert_passphrase", fields: [passphraseSecretId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_cert_passphrase")
+  workspace        Workspace    @relation("fk_cert_ws", fields: [workspaceId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_cert_ws")
+  apiRequests      ApiRequest[] @relation("fk_request_cert")
+
+  @@index([workspaceId, hostPattern], map: "ix_clientcert_ws_host")
+  @@index([notAfter], map: "ix_clientcert_expiry")
+  @@map("client_certificates")
+}
+
+/// CookieJarEntry -> tabla `cookie_jar_entries`.
+/// El brief nombra las cookies explicitamente junto a credenciales y tokens como
+/// algo que publicar una coleccion NO puede arrastrar. Por eso el valor no esta
+/// en esta fila: esta en `secrets`, al otro lado de la frontera, y esta tabla
+/// cuelga del WORKSPACE o del ENTORNO, nunca de la coleccion. Publicar una
+/// coleccion no tiene ninguna ruta de FK que llegue hasta aqui.
+/// Purga: borrado fisico de filas con expires_at < now().
+///
+model CookieJarEntry {
+  id            String         @id @default(uuid(7)) @db.Uuid
+  workspaceId   String         @map("workspace_id") @db.Uuid
+  environmentId String?        @map("environment_id") @db.Uuid // Tarro de cookies por entorno. NULL = tarro del workspace.
+  ownerUserId   String?        @map("owner_user_id") @db.Uuid // NULL = cookie compartida. No NULL = cookie personal, nunca se comparte ni se exporta.
+  domain        String
+  path          String         @default("/")
+  name          String
+  valueSecretId String         @map("value_secret_id") @db.Uuid // El VALOR de la cookie es un secreto: va cifrado en la boveda.
+  isHttpOnly    Boolean        @default(false) @map("is_http_only")
+  isSecure      Boolean        @default(true) @map("is_secure")
+  sameSite      CookieSameSite @default(lax) @map("same_site")
+  expiresAt     DateTime?      @map("expires_at") @db.Timestamptz(6)
+  createdAt     DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime       @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  // --- Relaciones -------------------------------------------------------
+  environment Environment? @relation("fk_cookie_env", fields: [environmentId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_cookie_env")
+  ownerUser   User?        @relation("fk_cookie_owner", fields: [ownerUserId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_cookie_owner")
+  valueSecret Secret       @relation("fk_cookie_secret", fields: [valueSecretId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_cookie_secret")
+  workspace   Workspace    @relation("fk_cookie_ws", fields: [workspaceId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_cookie_ws")
+
+  @@unique([workspaceId, environmentId, domain, path, name, ownerUserId], map: "uq_cookie_identity")
+  @@index([expiresAt], map: "ix_cookie_expiry")
+  @@map("cookie_jar_entries")
+}

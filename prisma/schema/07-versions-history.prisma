@@ -1,0 +1,212 @@
+// =============================================================================
+// CEIBA API Studio - BLOQUE 6 - Versiones, historial y ciclo de vida de las respuestas
+// GENERADO por prisma/tools/dbml-to-prisma.mjs desde docs/schema/ceiba.dbml.
+// NO EDITAR A MANO.
+// =============================================================================
+
+/// CollectionVersion -> tabla `collection_versions`.
+/// Versionado de la seccion 15: quien modifico que y cuando, comparar versiones
+/// y restaurar.
+///
+/// CHECK ck_version_storage: exactamente uno de (snapshot_file_id, snapshot_inline).
+/// CHECK ck_version_no_secrets: secrets_excluded = true.
+///   Es un CHECK y no un valor por defecto a proposito: convierte en imposible,
+///   a nivel de motor, insertar una version marcada como portadora de secretos.
+///   Si alguien algun dia serializa credenciales en la instantanea, tiene que
+///   borrar este CHECK en una migracion, y eso se ve en la revision.
+///
+/// Una RESTAURACION no borra nada: crea una version nueva con source='restore'
+/// y parent_version_id apuntando a la restaurada. El historial es append-only.
+/// Por eso esta tabla no tiene deleted_at.
+///
+model CollectionVersion {
+  id                String        @id @default(uuid(7)) @db.Uuid
+  collectionId      String        @map("collection_id") @db.Uuid
+  versionNumber     Int           @map("version_number") // Monotono por coleccion, empieza en 1.
+  parentVersionId   String?       @map("parent_version_id") @db.Uuid // Encadena versiones; permite reconstruir el linaje tras una restauracion.
+  source            VersionSource @default(manual)
+  label             String?
+  changeSummary     String?       @map("change_summary") // Que cambio, en texto. Quien y cuando estan en las columnas.
+  snapshotFileId    String?       @map("snapshot_file_id") @db.Uuid // Instantanea serializada en almacenamiento de objetos. Preferida para colecciones grandes.
+  snapshotInline    Json?         @map("snapshot_inline") // Instantanea embebida, solo para colecciones pequenas. Excluyente con snapshot_file_id.
+  snapshotSha256    Bytes         @map("snapshot_sha256")
+  snapshotSizeBytes BigInt        @default(0) @map("snapshot_size_bytes")
+  requestCount      Int           @default(0) @map("request_count")
+  secretsExcluded   Boolean       @default(true) @map("secrets_excluded") // Invariante: SIEMPRE true. La instantanea contiene metadatos y referencias, nunca material criptografico.
+  createdByUserId   String?       @map("created_by_user_id") @db.Uuid
+  createdAt         DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  // --- Relaciones -------------------------------------------------------
+  collection    Collection          @relation("fk_version_collection", fields: [collectionId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_version_collection")
+  createdByUser User?               @relation("fk_version_creator", fields: [createdByUserId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_version_creator")
+  snapshotFile  File?               @relation("fk_version_file", fields: [snapshotFileId], references: [id], onDelete: Restrict, onUpdate: NoAction, map: "fk_version_file")
+  parentVersion CollectionVersion?  @relation("fk_version_parent", fields: [parentVersionId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_version_parent")
+  childVersions CollectionVersion[] @relation("fk_version_parent")
+
+  @@unique([collectionId, versionNumber], map: "uq_version_collection_number")
+  @@index([collectionId, createdAt], map: "ix_version_collection_time")
+  @@index([parentVersionId], map: "ix_version_parent")
+  @@index([snapshotFileId], map: "ix_version_file")
+  @@map("collection_versions")
+}
+
+/// RequestHistory -> tabla `request_history`.
+/// Tabla de mayor crecimiento del sistema. Decisiones de escala:
+///  - PARTICIONADA POR RANGO sobre executed_at (mensual). La limpieza del
+///    historial es DROP PARTITION, operacion O(1), no un DELETE de millones de
+///    filas que infla el WAL y deja la tabla con bloat.
+///    DBML no expresa particiones; va en la migracion.
+///  - La PK real en una tabla particionada debe incluir la clave de particion:
+///    PRIMARY KEY (id, executed_at). DBML solo deja declarar `id`.
+///  - Los indices se crean por particion (indices locales).
+///
+/// NO SE GUARDAN SECRETOS (seccion 15, y es tambien lo que pide el cliente):
+///  - `url_final` se persiste con los valores de variables secretas sustituidos
+///    por un marcador. La URL con el token dentro NUNCA llega a disco.
+///  - Los dos jsonb de cabeceras guardan los NOMBRES y, para las cabeceras
+///    sensibles, un marcador en vez del valor.
+///  - `error_message` es saneado.
+///
+/// LOS CUERPOS NO SE GUARDAN POR DEFECTO:
+///  `body_persistence` por defecto es none y `response_artifact_id` queda NULL.
+///  El metadato de la seccion 15 (metodo, URL, fecha, estado, duracion, tamano,
+///  workspace, coleccion, endpoint) se conserva igual, que es justo lo que pide
+///  el requisito, y volver a ejecutar una entrada del historial no necesita el
+///  cuerpo de la respuesta anterior.
+///
+model RequestHistory {
+  id                      String           @id @default(uuid(7)) @db.Uuid
+  workspaceId             String           @map("workspace_id") @db.Uuid
+  collectionId            String?          @map("collection_id") @db.Uuid // NULL si la solicitud fue efimera, no guardada en una coleccion.
+  apiRequestId            String?          @map("api_request_id") @db.Uuid // NULL si la solicitud fue borrada o nunca existio como endpoint guardado.
+  environmentId           String?          @map("environment_id") @db.Uuid
+  executedByUserId        String?          @map("executed_by_user_id") @db.Uuid // NULL si la ejecucion vino de un enlace compartido anonimo.
+  sharedLinkId            String?          @map("shared_link_id") @db.Uuid // No NULL si la ejecuto un visitante por enlace.
+  collectionRunId         String?          @map("collection_run_id") @db.Uuid
+  method                  HttpMethod
+  methodCustom            String?          @map("method_custom")
+  urlFinal                String           @map("url_final") // URL efectiva con variables resueltas y SECRETOS REDACTADOS antes de persistir.
+  urlHost                 String           @map("url_host") // Host extraido, para filtrar y agregar sin parsear la URL.
+  requestSizeBytes        BigInt?          @map("request_size_bytes")
+  statusCode              Int?             @map("status_code") @db.SmallInt // NULL si no hubo respuesta (error de conexion).
+  statusText              String?          @map("status_text")
+  outcome                 ExecutionOutcome
+  errorCode               String?          @map("error_code")
+  errorMessage            String?          @map("error_message") // Mensaje saneado. Nunca cabeceras ni cuerpo.
+  durationTotalMs         Int?             @map("duration_total_ms")
+  durationTtfbMs          Int?             @map("duration_ttfb_ms") // Tiempo hasta el primer byte (seccion 8).
+  durationDnsMs           Int?             @map("duration_dns_ms")
+  durationTlsMs           Int?             @map("duration_tls_ms")
+  responseSizeBytes       BigInt?          @map("response_size_bytes")
+  responseContentType     String?          @map("response_content_type")
+  redirectCount           Int              @default(0) @map("redirect_count") @db.SmallInt
+  requestHeadersSnapshot  Json?            @map("request_headers_snapshot") // Cabeceras ENVIADAS con los valores sensibles sustituidos por un marcador. Nunca el valor real.
+  responseHeadersSnapshot Json?            @map("response_headers_snapshot") // Cabeceras recibidas, con Set-Cookie y Authorization redactados.
+  responseArtifactId      String?          @map("response_artifact_id") @db.Uuid // NULL en la configuracion por defecto: el cuerpo NO se guarda.
+  requestArtifactId       String?          @map("request_artifact_id") @db.Uuid
+  bodyPersistence         BodyPersistence  @default(none) @map("body_persistence") // Que politica se aplico a ESTA ejecucion. Se guarda para poder auditar por que existe o no un cuerpo.
+  isPinned                Boolean          @default(false) @map("is_pinned") // El usuario fija una entrada para que la purga por antiguedad no se la lleve.
+  executedAt              DateTime         @default(now()) @map("executed_at") @db.Timestamptz(6)
+  expiresAt               DateTime         @map("expires_at") @db.Timestamptz(6) // Caducidad del METADATO. Derivada de workspaces.history_retention_days.
+
+  // --- Relaciones -------------------------------------------------------
+  collection       Collection?       @relation("fk_history_collection", fields: [collectionId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_history_collection")
+  environment      Environment?      @relation("fk_history_env", fields: [environmentId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_history_env")
+  requestArtifact  ResponseArtifact? @relation("fk_history_req_artifact", fields: [requestArtifactId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_history_req_artifact")
+  apiRequest       ApiRequest?       @relation("fk_history_request", fields: [apiRequestId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_history_request")
+  responseArtifact ResponseArtifact? @relation("fk_history_resp_artifact", fields: [responseArtifactId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_history_resp_artifact")
+  collectionRun    CollectionRun?    @relation("fk_history_run", fields: [collectionRunId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_history_run")
+  sharedLink       SharedLink?       @relation("fk_history_share", fields: [sharedLinkId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_history_share")
+  executedByUser   User?             @relation("fk_history_user", fields: [executedByUserId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_history_user")
+  workspace        Workspace         @relation("fk_history_ws", fields: [workspaceId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_history_ws")
+  testRuns         TestRun[]         @relation("fk_testrun_history")
+
+  @@index([workspaceId, executedAt], map: "ix_history_ws_time")
+  @@index([apiRequestId, executedAt], map: "ix_history_request_time")
+  @@index([executedByUserId, executedAt], map: "ix_history_user_time")
+  @@index([collectionId, executedAt], map: "ix_history_collection_time")
+  @@index([workspaceId, statusCode, executedAt], map: "ix_history_ws_status")
+  @@index([urlHost], map: "ix_history_host")
+  @@index([expiresAt], map: "ix_history_expiry")
+  @@index([collectionRunId], map: "ix_history_run")
+  @@index([responseArtifactId], map: "ix_history_artifact")
+  @@map("request_history")
+}
+
+/// ResponseArtifact -> tabla `response_artifacts`.
+/// AQUI SE CUMPLE "no almacenar indefinidamente todos los cuerpos de respuesta".
+///
+/// Tres barreras, no una:
+///  1. `expires_at` es NOT NULL. El modelo no admite un artefacto eterno.
+///     Una fila sin caducidad no se puede insertar.
+///  2. El cuerpo vive FUERA de la fila del historial, en una tabla 1:0..1. Lo
+///     normal es que no exista. La purga borra el artefacto y deja intacto el
+///     metadato del historial, que es barato y util.
+///  3. `is_truncated` + `stored_bytes` permiten guardar solo los primeros N
+///     bytes (workspaces.response_max_persist_bytes) en vez del cuerpo entero.
+///
+/// Purga: job periodico que recorre ix_artifact_purge, borra el objeto del
+/// almacen, pone state='purged' y vacia storage_key/inline_content. La fila
+/// sobrevive como lapida para que el historial pueda decir "habia un cuerpo y
+/// caduco" en lugar de mentir con un 404 ambiguo.
+/// CHECK ck_artifact_storage: (storage = 'inline_db') = (inline_content IS NOT NULL).
+/// CHECK ck_artifact_sizes: stored_bytes <= size_bytes.
+///
+model ResponseArtifact {
+  id              String         @id @default(uuid(7)) @db.Uuid
+  workspaceId     String         @map("workspace_id") @db.Uuid
+  storage         StorageBackend @default(object_store)
+  storageKey      String?        @map("storage_key") // Clave en el almacen de objetos. NULL si storage = inline_db.
+  inlineContent   Bytes?         @map("inline_content") // Solo para contenido pequeno y truncado.
+  contentType     String?        @map("content_type")
+  contentEncoding String?        @map("content_encoding")
+  sizeBytes       BigInt         @map("size_bytes")
+  storedBytes     BigInt         @map("stored_bytes") // Lo realmente guardado. Menor que size_bytes si esta truncado.
+  isTruncated     Boolean        @default(false) @map("is_truncated")
+  checksumSha256  Bytes?         @map("checksum_sha256")
+  state           ArtifactState  @default(stored)
+  retentionReason String?        @map("retention_reason") // Por que existe este artefacto: politica del workspace, fijado por el usuario, o adjunto a un fallo de test.
+  createdAt       DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  expiresAt       DateTime       @map("expires_at") @db.Timestamptz(6) // OBLIGATORIO. No hay forma de crear un artefacto sin caducidad.
+  purgedAt        DateTime?      @map("purged_at") @db.Timestamptz(6)
+
+  // --- Relaciones -------------------------------------------------------
+  workspace                      Workspace        @relation("fk_artifact_ws", fields: [workspaceId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_artifact_ws")
+  requestHistoryRequestArtifact  RequestHistory[] @relation("fk_history_req_artifact")
+  requestHistoryResponseArtifact RequestHistory[] @relation("fk_history_resp_artifact")
+
+  @@unique([storageKey], map: "uq_artifact_storage_key")
+  @@index([state, expiresAt], map: "ix_artifact_purge")
+  @@index([workspaceId, createdAt], map: "ix_artifact_ws_time")
+  @@map("response_artifacts")
+}
+
+/// RetentionPolicy -> tabla `retention_policies`.
+/// Una fila por workspace. Las columnas equivalentes en `workspaces` son el
+/// valor por defecto en el momento de crearlo; esta tabla es la politica viva y
+/// editable, con su propia auditoria de quien la cambio.
+/// Duplicar los campos es deliberado: `workspaces` debe poder responder la
+/// politica en la ruta caliente de ejecucion sin un JOIN adicional, y un trigger
+/// mantiene ambas en sincronia.
+///
+model RetentionPolicy {
+  id                      String          @id @default(uuid(7)) @db.Uuid
+  workspaceId             String          @map("workspace_id") @db.Uuid
+  historyRetentionDays    Int             @default(90) @map("history_retention_days")
+  responseBodyPersistence BodyPersistence @default(none) @map("response_body_persistence")
+  responseRetentionDays   Int             @default(7) @map("response_retention_days")
+  responseMaxPersistBytes BigInt          @default(262144) @map("response_max_persist_bytes")
+  persistOnlyOnFailure    Boolean         @default(false) @map("persist_only_on_failure") // Guardar cuerpo solo cuando el test falla o el estado es 4xx/5xx. Caso de uso habitual, coste bajo.
+  auditRetentionDays      Int             @default(365) @map("audit_retention_days")
+  attemptLogRetentionDays Int             @default(90) @map("attempt_log_retention_days")
+  pinnedItemMaxAgeDays    Int?            @map("pinned_item_max_age_days") // NULL = las entradas fijadas no caducan nunca.
+  updatedByUserId         String?         @map("updated_by_user_id") @db.Uuid
+  updatedAt               DateTime        @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  // --- Relaciones -------------------------------------------------------
+  updatedByUser User?     @relation("fk_retention_user", fields: [updatedByUserId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_retention_user")
+  workspace     Workspace @relation("fk_retention_ws", fields: [workspaceId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_retention_ws")
+
+  @@unique([workspaceId], map: "uq_retention_workspace")
+  @@map("retention_policies")
+}

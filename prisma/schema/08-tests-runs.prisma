@@ -1,0 +1,143 @@
+// =============================================================================
+// CEIBA API Studio - BLOQUE 7 - Pruebas y ejecuciones de coleccion
+// GENERADO por prisma/tools/dbml-to-prisma.mjs desde docs/schema/ceiba.dbml.
+// NO EDITAR A MANO.
+// =============================================================================
+
+/// TestDefinition -> tabla `test_definitions`.
+/// Cubre las validaciones de la seccion 13: codigo HTTP, cabeceras, tiempo de
+/// respuesta, esquema JSON, propiedades obligatorias, valores concretos,
+/// expresiones, contenido y secuencias.
+/// Las aserciones declarativas (todas menos script) se guardan parametrizadas y
+/// no como codigo: se pueden ejecutar sin levantar el sandbox, que es mas rapido
+/// y elimina la superficie de ataque del motor de scripts en el caso comun.
+/// CHECK ck_test_scope: (collection_id IS NULL) <> (api_request_id IS NULL).
+/// CHECK ck_test_script: (kind = 'script') = (script_body IS NOT NULL).
+///
+model TestDefinition {
+  id                String    @id @default(uuid(7)) @db.Uuid
+  workspaceId       String    @map("workspace_id") @db.Uuid
+  collectionId      String?   @map("collection_id") @db.Uuid // Test de coleccion. Excluyente con api_request_id.
+  apiRequestId      String?   @map("api_request_id") @db.Uuid // Test de endpoint. Excluyente con collection_id.
+  name              String
+  description       String?
+  kind              TestKind
+  targetPath        String?   @map("target_path") // JSONPath o nombre de cabecera, segun el tipo.
+  operator          String? // equals, not_equals, gt, lt, contains, matches...
+  expectedValue     String?   @map("expected_value")
+  expectedJson      Json?     @map("expected_json") // Esquema JSON cuando kind = json_schema.
+  maxResponseTimeMs Int?      @map("max_response_time_ms")
+  scriptBody        String?   @map("script_body") // Solo cuando kind = script. Se ejecuta en sandbox aislado; el esquema solo lo almacena.
+  sequencePosition  Int?      @map("sequence_position") // Orden dentro de una secuencia de solicitudes (kind = sequence).
+  isEnabled         Boolean   @default(true) @map("is_enabled")
+  failRunOnError    Boolean   @default(true) @map("fail_run_on_error")
+  sortOrder         Int       @default(0) @map("sort_order")
+  createdByUserId   String?   @map("created_by_user_id") @db.Uuid
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
+  deletedAt         DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  // --- Relaciones -------------------------------------------------------
+  collection    Collection? @relation("fk_test_collection", fields: [collectionId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_test_collection")
+  createdByUser User?       @relation("fk_test_creator", fields: [createdByUserId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_test_creator")
+  apiRequest    ApiRequest? @relation("fk_test_request", fields: [apiRequestId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_test_request")
+  workspace     Workspace   @relation("fk_test_ws", fields: [workspaceId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_test_ws")
+  testRuns      TestRun[]   @relation("fk_testrun_definition")
+
+  @@index([apiRequestId, sortOrder], map: "ix_test_request_order")
+  @@index([collectionId, sortOrder], map: "ix_test_collection_order")
+  @@index([workspaceId, kind], map: "ix_test_ws_kind")
+  @@map("test_definitions")
+}
+
+/// CollectionRun -> tabla `collection_runs`.
+/// El runner de colecciones (seccion 13: guardar resultados y comparar
+/// ejecuciones). Los contadores estan desnormalizados a proposito: comparar dos
+/// tiradas de 2000 solicitudes no puede exigir agregar test_runs cada vez.
+/// CHECK ck_run_iterations: iterations BETWEEN 1 AND 1000.
+/// CHECK ck_run_times: finished_at IS NULL OR started_at IS NOT NULL.
+///
+model CollectionRun {
+  id                String     @id @default(uuid(7)) @db.Uuid
+  workspaceId       String     @map("workspace_id") @db.Uuid
+  collectionId      String     @map("collection_id") @db.Uuid
+  environmentId     String?    @map("environment_id") @db.Uuid
+  folderId          String?    @map("folder_id") @db.Uuid // Ejecutar solo una subcarpeta.
+  name              String?
+  trigger           RunTrigger @default(manual)
+  status            RunStatus  @default(queued)
+  iterations        Int        @default(1)
+  delayMs           Int        @default(0) @map("delay_ms")
+  stopOnFailure     Boolean    @default(false) @map("stop_on_failure")
+  variableOverrides Json?      @map("variable_overrides") // NIVEL EJECUCION de la precedencia (seccion 12). Efimero por naturaleza; se guarda solo para reproducir la tirada. CHECK + validacion de aplicacion impiden valores secretos aqui.
+  totalRequests     Int        @default(0) @map("total_requests")
+  completedRequests Int        @default(0) @map("completed_requests")
+  failedRequests    Int        @default(0) @map("failed_requests")
+  totalTests        Int        @default(0) @map("total_tests")
+  passedTests       Int        @default(0) @map("passed_tests")
+  failedTests       Int        @default(0) @map("failed_tests")
+  totalDurationMs   BigInt?    @map("total_duration_ms")
+  triggeredByUserId String?    @map("triggered_by_user_id") @db.Uuid
+  sharedLinkId      String?    @map("shared_link_id") @db.Uuid // Si la lanzo un visitante autorizado por enlace.
+  startedAt         DateTime?  @map("started_at") @db.Timestamptz(6)
+  finishedAt        DateTime?  @map("finished_at") @db.Timestamptz(6)
+  createdAt         DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  expiresAt         DateTime   @map("expires_at") @db.Timestamptz(6) // Los resultados de ejecucion tambien caducan.
+
+  // --- Relaciones -------------------------------------------------------
+  collection      Collection        @relation("fk_run_collection", fields: [collectionId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_run_collection")
+  environment     Environment?      @relation("fk_run_env", fields: [environmentId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_run_env")
+  folder          CollectionFolder? @relation("fk_run_folder", fields: [folderId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_run_folder")
+  sharedLink      SharedLink?       @relation("fk_run_share", fields: [sharedLinkId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_run_share")
+  triggeredByUser User?             @relation("fk_run_user", fields: [triggeredByUserId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_run_user")
+  workspace       Workspace         @relation("fk_run_ws", fields: [workspaceId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_run_ws")
+  requestHistory  RequestHistory[]  @relation("fk_history_run")
+  notifications   Notification[]    @relation("fk_notif_run")
+  testRuns        TestRun[]         @relation("fk_testrun_run")
+
+  @@index([collectionId, createdAt], map: "ix_run_collection_time")
+  @@index([workspaceId, status, createdAt], map: "ix_run_ws_status")
+  @@index([status, createdAt], map: "ix_run_status_time")
+  @@index([expiresAt], map: "ix_run_expiry")
+  @@map("collection_runs")
+}
+
+/// TestRun -> tabla `test_runs`.
+/// Alto volumen: una tirada de 2000 solicitudes con 5 aserciones cada una son
+/// 10000 filas. Por eso bigserial, particion mensual por executed_at y
+/// `expires_at` obligatorio.
+/// `actual_snapshot` se trunca: un test que falla no es excusa para persistir el
+/// cuerpo entero de la respuesta y saltarse la politica de retencion.
+/// `test_definition_id` es ON DELETE SET NULL, no CASCADE: borrar un test no
+/// debe reescribir la historia de las tiradas pasadas.
+///
+model TestRun {
+  id               BigInt     @id @default(autoincrement())
+  testDefinitionId String?    @map("test_definition_id") @db.Uuid // NULL si el test fue borrado despues de ejecutarse. El resultado historico sobrevive.
+  collectionRunId  String?    @map("collection_run_id") @db.Uuid // NULL en una ejecucion suelta de un endpoint.
+  requestHistoryId String?    @map("request_history_id") @db.Uuid // Ejecucion HTTP concreta contra la que se evaluo la asercion.
+  apiRequestId     String?    @map("api_request_id") @db.Uuid
+  iteration        Int        @default(1)
+  testNameSnapshot String     @map("test_name_snapshot") // Nombre del test en el momento de correr. Conserva legibilidad aunque luego lo renombren.
+  kind             TestKind
+  result           TestResult
+  expectedSnapshot String?    @map("expected_snapshot")
+  actualSnapshot   String?    @map("actual_snapshot") // Valor observado, TRUNCADO y saneado. Nunca un cuerpo completo ni una cabecera sensible.
+  failureMessage   String?    @map("failure_message")
+  durationMs       Int?       @map("duration_ms")
+  executedAt       DateTime   @default(now()) @map("executed_at") @db.Timestamptz(6)
+  expiresAt        DateTime   @map("expires_at") @db.Timestamptz(6)
+
+  // --- Relaciones -------------------------------------------------------
+  testDefinition TestDefinition? @relation("fk_testrun_definition", fields: [testDefinitionId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_testrun_definition")
+  requestHistory RequestHistory? @relation("fk_testrun_history", fields: [requestHistoryId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_testrun_history")
+  apiRequest     ApiRequest?     @relation("fk_testrun_request", fields: [apiRequestId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_testrun_request")
+  collectionRun  CollectionRun?  @relation("fk_testrun_run", fields: [collectionRunId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_testrun_run")
+
+  @@index([collectionRunId, executedAt], map: "ix_testrun_run")
+  @@index([testDefinitionId, executedAt], map: "ix_testrun_definition")
+  @@index([result, executedAt], map: "ix_testrun_result")
+  @@index([requestHistoryId], map: "ix_testrun_history")
+  @@index([expiresAt], map: "ix_testrun_expiry")
+  @@map("test_runs")
+}

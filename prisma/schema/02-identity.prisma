@@ -1,0 +1,248 @@
+// =============================================================================
+// CEIBA API Studio - BLOQUE 1 - Identidad, sesiones, workspaces, miembros, invitaciones
+// GENERADO por prisma/tools/dbml-to-prisma.mjs desde docs/schema/ceiba.dbml.
+// NO EDITAR A MANO.
+// =============================================================================
+
+/// User -> tabla `users`.
+/// CHECK ck_users_locked: locked_until IS NULL OR locked_until > created_at.
+/// CHECK ck_users_pwd_or_sso: password_hash IS NOT NULL OR status <> 'active'
+///   ... relajado si hay SSO; ver MODELO-DATOS.md.
+/// El indice unico de email es PARCIAL en la migracion real:
+///   CREATE UNIQUE INDEX uq_users_email ON users (email) WHERE deleted_at IS NULL;
+/// DBML no expresa indices parciales.
+///
+model User {
+  id                String     @id @default(uuid(7)) @db.Uuid
+  email             String // citext -> unicidad case-insensitive sin indice funcional.
+  emailVerifiedAt   DateTime?  @map("email_verified_at") @db.Timestamptz(6)
+  passwordHash      String?    @map("password_hash") // Argon2id. NULL si la cuenta es solo SSO. Nunca se devuelve por la API.
+  passwordUpdatedAt DateTime?  @map("password_updated_at") @db.Timestamptz(6)
+  displayName       String     @map("display_name")
+  avatarFileId      String?    @map("avatar_file_id") @db.Uuid
+  locale            String     @default("es")
+  timezone          String     @default("UTC")
+  status            UserStatus @default(invited)
+  mfaEnabled        Boolean    @default(false) @map("mfa_enabled")
+  mfaSecretId       String?    @map("mfa_secret_id") @db.Uuid // FK a secrets. El seed TOTP jamas se guarda en claro.
+  failedLoginCount  Int        @default(0) @map("failed_login_count")
+  lockedUntil       DateTime?  @map("locked_until") @db.Timestamptz(6)
+  lastLoginAt       DateTime?  @map("last_login_at") @db.Timestamptz(6)
+  createdAt         DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime   @default(now()) @map("updated_at") @db.Timestamptz(6)
+  deletedAt         DateTime?  @map("deleted_at") @db.Timestamptz(6) // Borrado logico. El correo se libera al purgar, no al borrar.
+
+  // --- Relaciones -------------------------------------------------------
+  avatarFile                 File?                @relation("fk_users_avatar", fields: [avatarFileId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_users_avatar")
+  mfaSecret                  Secret?              @relation("fk_users_mfa_secret", fields: [mfaSecretId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_users_mfa_secret")
+  shareAccessAttempts        ShareAccessAttempt[] @relation("fk_attempt_user")
+  auditLogs                  AuditLog[]           @relation("fk_audit_actor")
+  authConfigurations         AuthConfiguration[]  @relation("fk_authcfg_creator")
+  authCredentials            AuthCredential[]     @relation("fk_authcred_owner")
+  clientCertificates         ClientCertificate[]  @relation("fk_cert_creator")
+  collectionsCreatedBy       Collection[]         @relation("fk_collection_creator")
+  collectionsDeletedBy       Collection[]         @relation("fk_collection_deleter")
+  commentsAuthor             Comment[]            @relation("fk_comment_author")
+  commentsResolvedBy         Comment[]            @relation("fk_comment_resolver")
+  cookieJarEntries           CookieJarEntry[]     @relation("fk_cookie_owner")
+  environmentsCreatedBy      Environment[]        @relation("fk_env_creator")
+  environmentsDeletedBy      Environment[]        @relation("fk_env_deleter")
+  environmentsOwner          Environment[]        @relation("fk_env_owner")
+  files                      File[]               @relation("fk_file_owner")
+  collectionFoldersCreatedBy CollectionFolder[]   @relation("fk_folder_creator")
+  collectionFoldersDeletedBy CollectionFolder[]   @relation("fk_folder_deleter")
+  requestHistory             RequestHistory[]     @relation("fk_history_user")
+  invitationsAcceptedBy      Invitation[]         @relation("fk_inv_accepted_by")
+  invitationsInvitedBy       Invitation[]         @relation("fk_inv_invited_by")
+  workspaceMembersInvitedBy  WorkspaceMember[]    @relation("fk_member_invited_by")
+  workspaceMembersUser       WorkspaceMember[]    @relation("fk_member_user")
+  notificationsActor         Notification[]       @relation("fk_notif_actor")
+  notificationsRecipient     Notification[]       @relation("fk_notif_recipient")
+  projectsCreatedBy          Project[]            @relation("fk_project_creator")
+  projectsDeletedBy          Project[]            @relation("fk_project_deleter")
+  requestTags                RequestTag[]         @relation("fk_reqtag_user")
+  apiRequestsCreatedBy       ApiRequest[]         @relation("fk_request_creator")
+  apiRequestsDeletedBy       ApiRequest[]         @relation("fk_request_deleter")
+  retentionPolicies          RetentionPolicy[]    @relation("fk_retention_user")
+  collectionRuns             CollectionRun[]      @relation("fk_run_user")
+  scopedVariables            ScopedVariable[]     @relation("fk_scopedvar_creator")
+  secrets                    Secret[]             @relation("fk_secret_creator")
+  sessions                   Session[]            @relation("fk_sessions_user")
+  sharedLinksCreatedBy       SharedLink[]         @relation("fk_share_creator")
+  sharedLinksRevokedBy       SharedLink[]         @relation("fk_share_revoker")
+  shareAccessCodesCreatedBy  ShareAccessCode[]    @relation("fk_sharecode_creator")
+  shareAccessCodesRevokedBy  ShareAccessCode[]    @relation("fk_sharecode_revoker")
+  testDefinitions            TestDefinition[]     @relation("fk_test_creator")
+  variableLocalValues        VariableLocalValue[] @relation("fk_varlocal_user")
+  collectionVersions         CollectionVersion[]  @relation("fk_version_creator")
+  workspacesDeletedBy        Workspace[]          @relation("fk_ws_deleted_by")
+  workspacesOwner            Workspace[]          @relation("fk_ws_owner")
+
+  @@unique([email], map: "uq_users_email")
+  @@index([status, createdAt], map: "ix_users_status_created")
+  @@index([deletedAt], map: "ix_users_deleted_at")
+  @@map("users")
+}
+
+/// Session -> tabla `sessions`.
+/// Patron selector/verifier: la busqueda es O(1) por selector y la comparacion
+/// del verifier es en tiempo constante. Evita escanear la tabla hasheando fila a
+/// fila y evita el timing leak de comparar hashes con ==.
+/// Indice parcial real: ... ON sessions (user_id) WHERE revoked_at IS NULL.
+/// Purga: borrado FISICO de filas con absolute_expires_at < now() - 30 dias.
+///
+model Session {
+  id                String    @id @default(uuid(7)) @db.Uuid
+  userId            String    @map("user_id") @db.Uuid
+  tokenSelector     String    @map("token_selector") // Mitad publica del refresh token. Indexable, NO secreta.
+  tokenVerifierHash Bytes     @map("token_verifier_hash") // SHA-256 de la mitad secreta. El token en claro nunca se guarda.
+  parentSessionId   String?   @map("parent_session_id") @db.Uuid // Rotacion de refresh token: detecta reutilizacion de token robado.
+  userAgent         String?   @map("user_agent")
+  clientIp          String?   @map("client_ip") @db.Inet
+  deviceLabel       String?   @map("device_label")
+  issuedAt          DateTime  @default(now()) @map("issued_at") @db.Timestamptz(6)
+  lastSeenAt        DateTime  @default(now()) @map("last_seen_at") @db.Timestamptz(6)
+  absoluteExpiresAt DateTime  @map("absolute_expires_at") @db.Timestamptz(6) // Caducidad dura; no se extiende con el uso.
+  idleExpiresAt     DateTime  @map("idle_expires_at") @db.Timestamptz(6) // Caducidad por inactividad; se desplaza al refrescar.
+  revokedAt         DateTime? @map("revoked_at") @db.Timestamptz(6)
+  revokedReason     String?   @map("revoked_reason")
+
+  // --- Relaciones -------------------------------------------------------
+  parentSession Session?   @relation("fk_sessions_parent", fields: [parentSessionId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_sessions_parent")
+  user          User       @relation("fk_sessions_user", fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_sessions_user")
+  auditLogs     AuditLog[] @relation("fk_audit_session")
+  childSessions Session[]  @relation("fk_sessions_parent")
+
+  @@unique([tokenSelector], map: "uq_sessions_selector")
+  @@index([userId, lastSeenAt], map: "ix_sessions_user_lastseen")
+  @@index([absoluteExpiresAt], map: "ix_sessions_abs_expiry")
+  @@index([parentSessionId], map: "ix_sessions_parent")
+  @@map("sessions")
+}
+
+/// Workspace -> tabla `workspaces`.
+/// CHECK ck_ws_retention: response_retention_days BETWEEN 0 AND 365.
+/// CHECK ck_ws_maxbytes: response_max_persist_bytes BETWEEN 0 AND 10485760.
+/// Indice unico real es parcial: WHERE deleted_at IS NULL (permite reutilizar
+/// un slug despues de borrar un workspace).
+///
+model Workspace {
+  id                       String          @id @default(uuid(7)) @db.Uuid
+  slug                     String // Identificador estable en URL, independiente del nombre.
+  name                     String
+  description              String?
+  iconFileId               String?         @map("icon_file_id") @db.Uuid
+  iconEmoji                String?         @map("icon_emoji")
+  ownerUserId              String          @map("owner_user_id") @db.Uuid // Denormalizado para consultas rapidas; la verdad esta en workspace_members.
+  settings                 Json            @default("{}")
+  responseBodyPersistence  BodyPersistence @default(none) @map("response_body_persistence") // Politica por defecto del workspace para cuerpos de respuesta.
+  responseRetentionDays    Int             @default(7) @map("response_retention_days")
+  responseMaxPersistBytes  BigInt          @default(262144) @map("response_max_persist_bytes")
+  historyRetentionDays     Int             @default(90) @map("history_retention_days")
+  allowPublicSharing       Boolean         @default(true) @map("allow_public_sharing")
+  allowSharedLinkExecution Boolean         @default(false) @map("allow_shared_link_execution") // Ejecucion publica desactivada por defecto (seccion 6).
+  status                   LifecycleStatus @default(active)
+  createdAt                DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt                DateTime        @default(now()) @map("updated_at") @db.Timestamptz(6)
+  deletedAt                DateTime?       @map("deleted_at") @db.Timestamptz(6)
+  deletedByUserId          String?         @map("deleted_by_user_id") @db.Uuid
+
+  // --- Relaciones -------------------------------------------------------
+  deletedByUser      User?               @relation("fk_ws_deleted_by", fields: [deletedByUserId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_ws_deleted_by")
+  iconFile           File?               @relation("fk_ws_icon", fields: [iconFileId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_ws_icon")
+  ownerUser          User                @relation("fk_ws_owner", fields: [ownerUserId], references: [id], onDelete: Restrict, onUpdate: NoAction, map: "fk_ws_owner")
+  responseArtifacts  ResponseArtifact[]  @relation("fk_artifact_ws")
+  auditLogs          AuditLog[]          @relation("fk_audit_ws")
+  authConfigurations AuthConfiguration[] @relation("fk_authcfg_ws")
+  clientCertificates ClientCertificate[] @relation("fk_cert_ws")
+  collections        Collection[]        @relation("fk_collection_ws")
+  comments           Comment[]           @relation("fk_comment_ws")
+  cookieJarEntries   CookieJarEntry[]    @relation("fk_cookie_ws")
+  environments       Environment[]       @relation("fk_env_ws")
+  files              File[]              @relation("fk_file_ws")
+  requestHistory     RequestHistory[]    @relation("fk_history_ws")
+  invitations        Invitation[]        @relation("fk_inv_ws")
+  workspaceMembers   WorkspaceMember[]   @relation("fk_member_ws")
+  notifications      Notification[]      @relation("fk_notif_ws")
+  projects           Project[]           @relation("fk_project_ws")
+  retentionPolicies  RetentionPolicy?    @relation("fk_retention_ws")
+  collectionRuns     CollectionRun[]     @relation("fk_run_ws")
+  scopedVariables    ScopedVariable[]    @relation("fk_scopedvar_ws")
+  secrets            Secret[]            @relation("fk_secret_ws")
+  sharedLinks        SharedLink[]        @relation("fk_share_ws")
+  tags               Tag[]               @relation("fk_tag_ws")
+  testDefinitions    TestDefinition[]    @relation("fk_test_ws")
+
+  @@unique([slug], map: "uq_workspaces_slug")
+  @@index([ownerUserId], map: "ix_workspaces_owner")
+  @@index([status, deletedAt], map: "ix_workspaces_status")
+  @@map("workspaces")
+}
+
+/// WorkspaceMember -> tabla `workspace_members`.
+/// Tabla de autorizacion canonica: TODA comprobacion de permiso del backend
+/// resuelve contra esta fila, no contra el frontend (seccion 5).
+/// CHECK ck_member_removed: (status = 'removed') = (removed_at IS NOT NULL).
+/// Invariante de aplicacion + trigger: cada workspace no borrado tiene al menos
+/// un miembro activo con role='owner'. No es expresable como CHECK de fila.
+///
+model WorkspaceMember {
+  id              String           @id @default(uuid(7)) @db.Uuid
+  workspaceId     String           @map("workspace_id") @db.Uuid
+  userId          String           @map("user_id") @db.Uuid
+  role            WorkspaceRole    @default(viewer)
+  status          MembershipStatus @default(active)
+  invitedByUserId String?          @map("invited_by_user_id") @db.Uuid
+  joinedAt        DateTime         @default(now()) @map("joined_at") @db.Timestamptz(6)
+  updatedAt       DateTime         @default(now()) @map("updated_at") @db.Timestamptz(6)
+  removedAt       DateTime?        @map("removed_at") @db.Timestamptz(6)
+  lastActiveAt    DateTime?        @map("last_active_at") @db.Timestamptz(6)
+
+  // --- Relaciones -------------------------------------------------------
+  invitedByUser User?     @relation("fk_member_invited_by", fields: [invitedByUserId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_member_invited_by")
+  user          User      @relation("fk_member_user", fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_member_user")
+  workspace     Workspace @relation("fk_member_ws", fields: [workspaceId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_member_ws")
+
+  @@unique([workspaceId, userId], map: "uq_member_ws_user")
+  @@index([userId, status], map: "ix_member_user_status")
+  @@index([workspaceId, role], map: "ix_member_ws_role")
+  @@map("workspace_members")
+}
+
+/// Invitation -> tabla `invitations`.
+/// Indice unico parcial real (no expresable en DBML):
+///   CREATE UNIQUE INDEX uq_invitation_pending ON invitations (workspace_id, email)
+///     WHERE status = 'pending';
+/// Impide dos invitaciones vivas al mismo correo en el mismo workspace, pero
+/// permite reinvitar tras revocar o caducar.
+/// CHECK ck_inv_accept: (status = 'accepted') = (accepted_at IS NOT NULL).
+///
+model Invitation {
+  id                String           @id @default(uuid(7)) @db.Uuid
+  workspaceId       String           @map("workspace_id") @db.Uuid
+  email             String
+  role              WorkspaceRole    @default(viewer)
+  tokenSelector     String           @map("token_selector") // Parte publica del enlace de invitacion.
+  tokenVerifierHash Bytes            @map("token_verifier_hash") // Hash del token. Nunca el token en claro.
+  status            InvitationStatus @default(pending)
+  message           String?
+  invitedByUserId   String?          @map("invited_by_user_id") @db.Uuid
+  acceptedByUserId  String?          @map("accepted_by_user_id") @db.Uuid
+  expiresAt         DateTime         @map("expires_at") @db.Timestamptz(6)
+  acceptedAt        DateTime?        @map("accepted_at") @db.Timestamptz(6)
+  revokedAt         DateTime?        @map("revoked_at") @db.Timestamptz(6)
+  resendCount       Int              @default(0) @map("resend_count")
+  lastSentAt        DateTime?        @map("last_sent_at") @db.Timestamptz(6)
+  createdAt         DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  // --- Relaciones -------------------------------------------------------
+  acceptedByUser User?          @relation("fk_inv_accepted_by", fields: [acceptedByUserId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_inv_accepted_by")
+  invitedByUser  User?          @relation("fk_inv_invited_by", fields: [invitedByUserId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_inv_invited_by")
+  workspace      Workspace      @relation("fk_inv_ws", fields: [workspaceId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_inv_ws")
+  notifications  Notification[] @relation("fk_notif_invitation")
+
+  @@unique([tokenSelector], map: "uq_invitations_selector")
+  @@index([workspaceId, email], map: "ix_invitations_ws_email")
+  @@index([status, expiresAt], map: "ix_invitations_status_expiry")
+  @@map("invitations")
+}

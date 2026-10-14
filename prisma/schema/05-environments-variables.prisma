@@ -1,0 +1,190 @@
+// =============================================================================
+// CEIBA API Studio - BLOQUE 4 - Entornos y variables (MODELO HIBRIDO, C-23: se conserva)
+// GENERADO por prisma/tools/dbml-to-prisma.mjs desde docs/schema/ceiba.dbml.
+// NO EDITAR A MANO.
+// =============================================================================
+
+/// Environment -> tabla `environments`.
+/// CHECK ck_env_owner: is_shared = true OR owner_user_id IS NOT NULL.
+/// Indice unico parcial real: WHERE deleted_at IS NULL.
+/// Un solo entorno por defecto por alcance: indice unico parcial
+///   ON environments (workspace_id, collection_id) WHERE is_default AND deleted_at IS NULL.
+/// Publicar una coleccion NO publica sus entornos (seccion 6): no existe FK de
+/// shared_links a environments, y el exportador no los recorre salvo peticion
+/// explicita de un miembro autorizado y con los secretos ya excluidos.
+///
+model Environment {
+  id              String          @id @default(uuid(7)) @db.Uuid
+  workspaceId     String          @map("workspace_id") @db.Uuid
+  collectionId    String?         @map("collection_id") @db.Uuid // NULL = entorno del workspace, visible por todas sus colecciones.
+  name            String
+  kind            EnvironmentKind @default(custom)
+  description     String?
+  color           String?
+  isDefault       Boolean         @default(false) @map("is_default")
+  isShared        Boolean         @default(true) @map("is_shared") // false = entorno personal; no se comparte con el workspace ni se exporta.
+  ownerUserId     String?         @map("owner_user_id") @db.Uuid // Obligatorio si is_shared = false.
+  sortKey         String          @map("sort_key")
+  lockVersion     Int             @default(0) @map("lock_version")
+  createdByUserId String?         @map("created_by_user_id") @db.Uuid
+  createdAt       DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime        @default(now()) @map("updated_at") @db.Timestamptz(6)
+  deletedAt       DateTime?       @map("deleted_at") @db.Timestamptz(6)
+  deletedByUserId String?         @map("deleted_by_user_id") @db.Uuid
+
+  // --- Relaciones -------------------------------------------------------
+  collection           Collection?           @relation("fk_env_collection", fields: [collectionId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_env_collection")
+  createdByUser        User?                 @relation("fk_env_creator", fields: [createdByUserId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_env_creator")
+  deletedByUser        User?                 @relation("fk_env_deleter", fields: [deletedByUserId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_env_deleter")
+  ownerUser            User?                 @relation("fk_env_owner", fields: [ownerUserId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_env_owner")
+  workspace            Workspace             @relation("fk_env_ws", fields: [workspaceId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_env_ws")
+  cookieJarEntries     CookieJarEntry[]      @relation("fk_cookie_env")
+  environmentVariables EnvironmentVariable[] @relation("fk_envvar_env")
+  requestHistory       RequestHistory[]      @relation("fk_history_env")
+  collectionRuns       CollectionRun[]       @relation("fk_run_env")
+
+  @@unique([workspaceId, collectionId, name], map: "uq_env_scope_name")
+  @@index([workspaceId, isShared], map: "ix_env_ws_shared")
+  @@index([ownerUserId], map: "ix_env_owner")
+  @@map("environments")
+}
+
+/// EnvironmentVariable -> tabla `environment_variables`.
+/// Modela los tres valores que pide la seccion 12:
+///  - initial_value: valor compartido, el que se exporta.
+///  - current_value: valor efectivo del equipo.
+///  - valor local por usuario: NO esta aqui, esta en
+///    variable_local_values, porque es por (variable, usuario).
+///
+/// CHECK ck_envvar_secret_xor:
+///   (value_kind = 'secret' AND initial_value IS NULL AND current_value IS NULL
+///      AND secret_id IS NOT NULL)
+///   OR (value_kind <> 'secret' AND secret_id IS NULL)
+/// Este es el control que hace cierta la frase los valores secretos no se hacen
+/// publicos automaticamente al compartir o exportar: no es una regla del
+/// serializador, es que la columna de texto esta vacia por restriccion.
+///
+model EnvironmentVariable {
+  id            String            @id @default(uuid(7)) @db.Uuid
+  environmentId String            @map("environment_id") @db.Uuid
+  key           String // Nombre sin llaves. {{base_url}} se guarda como base_url.
+  valueKind     VariableValueKind @default(string) @map("value_kind")
+  initialValue  String?           @map("initial_value") // Valor compartido, el que viaja en un export autorizado. NULL si es secreto.
+  currentValue  String?           @map("current_value") // Valor efectivo compartido. NULL si es secreto.
+  secretId      String?           @map("secret_id") @db.Uuid // Obligatorio si value_kind = secret. El valor jamas esta en esta fila.
+  description   String?
+  isEnabled     Boolean           @default(true) @map("is_enabled")
+  sortOrder     Int               @default(0) @map("sort_order")
+  createdAt     DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime          @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  // --- Relaciones -------------------------------------------------------
+  environment         Environment          @relation("fk_envvar_env", fields: [environmentId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_envvar_env")
+  secret              Secret?              @relation("fk_envvar_secret", fields: [secretId], references: [id], onDelete: Restrict, onUpdate: NoAction, map: "fk_envvar_secret")
+  variableLocalValues VariableLocalValue[] @relation("fk_varlocal_envvar")
+
+  @@unique([environmentId, key], map: "uq_envvar_env_key")
+  @@index([environmentId, sortOrder], map: "ix_envvar_order")
+  @@index([secretId], map: "ix_envvar_secret")
+  @@map("environment_variables")
+}
+
+/// VariableLocalValue -> tabla `variable_local_values`.
+/// Valores LOCALES de la seccion 12, para CUALQUIER ambito.
+///
+/// Correccion respecto a mi primer borrador: inicialmente modele el valor local
+/// solo para variables de entorno. Al contrastar con el ADR-0006 del arquitecto
+/// (que es el contrato normativo de precedencia segun el BRIEF 4.A.6) quedo claro
+/// que el par initialValue/localValue existe en TODOS los ambitos, no solo en el
+/// entorno. Esta tabla lo generaliza con dos FK excluyentes en vez de duplicar
+/// una tabla de overrides por cada tabla de variables.
+///
+/// Regla de resolucion (ADR-0006), en dos pasos y en este orden:
+///  1. Elegir el AMBITO ganador: el de mayor prioridad que defina la clave y la
+///     tenga habilitada.
+///  2. DENTRO de ese ambito, el valor local del usuario gana al compartido.
+/// El paso 2 NUNCA hace que un ambito pierda frente a otro: un valor local en
+/// workspace no gana a un valor compartido en el entorno activo.
+///
+/// Tabla aparte y no columna porque la cardinalidad es N usuarios x 1 variable.
+/// Borrado fisico en cascada: no tiene valor historico.
+/// CHECK ck_varlocal_target: exactamente una de
+///   (environment_variable_id, scoped_variable_id) no nula.
+///
+model VariableLocalValue {
+  id                    String   @id @default(uuid(7)) @db.Uuid
+  environmentVariableId String?  @map("environment_variable_id") @db.Uuid // Override de una variable de entorno. Excluyente con scoped_variable_id.
+  scopedVariableId      String?  @map("scoped_variable_id") @db.Uuid // Override de una variable global/workspace/coleccion/solicitud. Excluyente con environment_variable_id.
+  userId                String   @map("user_id") @db.Uuid
+  localValue            String?  @map("local_value") // Valor LOCAL del usuario. Nunca se comparte, ni se sincroniza, ni se exporta.
+  secretId              String?  @map("secret_id") @db.Uuid // Si el valor local es secreto.
+  isEnabled             Boolean  @default(true) @map("is_enabled")
+  createdAt             DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  // --- Relaciones -------------------------------------------------------
+  environmentVariable EnvironmentVariable? @relation("fk_varlocal_envvar", fields: [environmentVariableId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_varlocal_envvar")
+  scopedVariable      ScopedVariable?      @relation("fk_varlocal_scopedvar", fields: [scopedVariableId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_varlocal_scopedvar")
+  secret              Secret?              @relation("fk_varlocal_secret", fields: [secretId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_varlocal_secret")
+  user                User                 @relation("fk_varlocal_user", fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_varlocal_user")
+
+  @@unique([environmentVariableId, userId], map: "uq_varlocal_envvar_user")
+  @@unique([scopedVariableId, userId], map: "uq_varlocal_scopedvar_user")
+  @@index([userId], map: "ix_varlocal_user")
+  @@index([secretId], map: "ix_varlocal_secret")
+  @@map("variable_local_values")
+}
+
+/// ScopedVariable -> tabla `scoped_variables`.
+///  Cuatro de los seis niveles de la seccion 12 en una tabla con discriminador,
+///  en lugar de cuatro tablas casi identicas. Lo justifico asi: el resolvedor de
+///  variables necesita, para una solicitud dada, TODOS los niveles ordenados por
+///  precedencia en una sola consulta. Con cuatro tablas eso es un UNION ALL de
+///  cuatro ramas en cada ejecucion; con una tabla es un unico indice.
+///
+///  `environment_variables` SI es tabla aparte, y no es incoherencia: el nivel
+///  entorno tiene un ciclo de vida distinto (initial vs current vs local por
+///  usuario, pertenencia a un entorno conmutable). Meterlo aqui obligaria a
+///  dejar tres columnas nulas en los otros tres niveles.
+///
+///  CHECK ck_scopedvar_shape (exactamente un ancla segun el scope):
+///    (scope='global'      AND workspace_id IS NULL AND collection_id IS NULL AND api_request_id IS NULL)
+/// OR (scope='workspace'   AND workspace_id IS NOT NULL AND collection_id IS NULL AND api_request_id IS NULL)
+/// OR (scope='collection'  AND workspace_id IS NOT NULL AND collection_id IS NOT NULL AND api_request_id IS NULL)
+/// OR (scope='api_request' AND workspace_id IS NOT NULL AND api_request_id IS NOT NULL)
+///  CHECK ck_scopedvar_secret_xor: igual que en environment_variables.
+///  El indice unico necesita NULLS NOT DISTINCT (PostgreSQL 15+) para que dos
+///  globales con la misma clave colisionen de verdad.
+///
+model ScopedVariable {
+  id              String            @id @default(uuid(7)) @db.Uuid
+  scope           VariableScope // global | workspace | collection | api_request.
+  workspaceId     String?           @map("workspace_id") @db.Uuid // NULL solo cuando scope = global.
+  collectionId    String?           @map("collection_id") @db.Uuid
+  apiRequestId    String?           @map("api_request_id") @db.Uuid
+  key             String
+  valueKind       VariableValueKind @default(string) @map("value_kind")
+  value           String? // NULL si value_kind = secret.
+  secretId        String?           @map("secret_id") @db.Uuid
+  description     String?
+  isEnabled       Boolean           @default(true) @map("is_enabled")
+  sortOrder       Int               @default(0) @map("sort_order")
+  createdByUserId String?           @map("created_by_user_id") @db.Uuid
+  createdAt       DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime          @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  // --- Relaciones -------------------------------------------------------
+  collection          Collection?          @relation("fk_scopedvar_collection", fields: [collectionId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_scopedvar_collection")
+  createdByUser       User?                @relation("fk_scopedvar_creator", fields: [createdByUserId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_scopedvar_creator")
+  apiRequest          ApiRequest?          @relation("fk_scopedvar_request", fields: [apiRequestId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_scopedvar_request")
+  secret              Secret?              @relation("fk_scopedvar_secret", fields: [secretId], references: [id], onDelete: Restrict, onUpdate: NoAction, map: "fk_scopedvar_secret")
+  workspace           Workspace?           @relation("fk_scopedvar_ws", fields: [workspaceId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_scopedvar_ws")
+  variableLocalValues VariableLocalValue[] @relation("fk_varlocal_scopedvar")
+
+  @@unique([scope, workspaceId, collectionId, apiRequestId, key], map: "uq_scopedvar_identity")
+  @@index([workspaceId, scope], map: "ix_scopedvar_ws_scope")
+  @@index([collectionId], map: "ix_scopedvar_collection")
+  @@index([apiRequestId], map: "ix_scopedvar_request")
+  @@index([secretId], map: "ix_scopedvar_secret")
+  @@map("scoped_variables")
+}

@@ -1,0 +1,405 @@
+// =============================================================================
+// CEIBA API Studio - Enumeraciones
+// GENERADO por prisma/tools/dbml-to-prisma.mjs desde docs/schema/ceiba.dbml.
+// NO EDITAR A MANO: regenera con `node prisma/tools/dbml-to-prisma.mjs`.
+//
+// Cada enum conserva su nombre PostgreSQL exacto via @@map. Los VALORES se
+// escriben tal cual estan en el DBML: cambiar uno obliga a un ALTER TYPE y
+// romperia los datos existentes.
+// =============================================================================
+
+enum UserStatus {
+  active
+  invited
+  suspended
+  deactivated
+
+  @@map("user_status")
+}
+
+enum WorkspaceRole {
+  owner // Administra workspace y miembros. Unico que transfiere propiedad y borra el workspace.
+  admin // Gestiona recursos y permisos salvo operaciones reservadas al propietario.
+  editor // Crea, modifica, mueve y organiza recursos autorizados.
+  executor // Ejecuta solicitudes y pruebas sin alterar la estructura compartida.
+  viewer // Solo lectura de recursos autorizados.
+
+  @@map("workspace_role")
+}
+
+enum MembershipStatus {
+  active
+  suspended
+  removed
+
+  @@map("membership_status")
+}
+
+enum InvitationStatus {
+  pending
+  accepted
+  revoked
+  expired
+
+  @@map("invitation_status")
+}
+
+enum LifecycleStatus {
+  active
+  archived
+
+  @@map("lifecycle_status")
+}
+
+enum CollectionVisibility {
+  private // Solo miembros del workspace con permiso.
+  link_public // Enlace publico sin cuenta.
+  link_private // Enlace + codigo de acceso hasheado.
+
+  @@map("collection_visibility")
+}
+
+enum SharePermission {
+  viewer // Solo lectura.
+  viewer_export // Lectura y descarga/exportacion (sin secretos).
+  executor // Ejecucion. Desactivado por defecto; nunca concede edicion.
+
+  @@map("share_permission")
+}
+
+enum ShareState {
+  active
+  expired
+  revoked
+
+  @@map("share_state")
+}
+
+enum AccessAttemptResult {
+  success
+  invalid_code
+  expired
+  revoked
+  rate_limited
+  locked_out
+
+  @@map("access_attempt_result")
+}
+
+enum HttpMethod {
+  GET
+  POST
+  PUT
+  PATCH
+  DELETE
+  HEAD
+  OPTIONS
+  TRACE
+  CUSTOM // El verbo real va en api_requests.method_custom.
+
+  @@map("http_method")
+}
+
+enum BodyMode {
+  none
+  raw_json
+  raw_text
+  raw_xml
+  raw_html
+  graphql
+  form_urlencoded
+  multipart_form_data
+  binary_file
+  custom
+
+  @@map("body_mode")
+}
+
+enum ParamKind {
+  query
+  path
+
+  @@map("param_kind")
+}
+
+enum AuthMode {
+  inherit // Hereda del ancestro mas cercano: carpeta -> coleccion -> workspace.
+  none // Corta la herencia explicitamente.
+  explicit // Usa la auth_configuration asociada.
+
+  @@map("auth_mode")
+}
+
+enum AuthType {
+  none
+  basic
+  bearer
+  api_key_header
+  api_key_query
+  oauth2_client_credentials
+  oauth2_authorization_code_pkce
+  oauth2_refresh_token
+  digest
+  mtls_client_cert
+  custom
+
+  @@map("auth_type")
+}
+
+enum CredentialSlot {
+  username
+  password
+  bearer_token
+  api_key
+  client_id
+  client_secret
+  refresh_token
+  access_token
+  private_key
+  key_passphrase
+  client_certificate
+  ca_bundle
+  cookie_value
+  totp_seed
+
+  @@map("credential_slot")
+}
+
+enum SecretScope {
+  user
+  workspace
+  collection
+  environment
+  api_request
+
+  @@map("secret_scope")
+}
+
+enum SecretState {
+  active
+  rotating
+  revoked
+
+  @@map("secret_state")
+}
+
+enum EnvironmentKind {
+  local
+  development
+  testing
+  staging
+  production
+  custom
+
+  @@map("environment_kind")
+}
+
+enum VariableScope {
+  global // Instalacion completa. Solo administradores de plataforma.
+  workspace
+  collection
+  api_request
+
+  @@map("variable_scope")
+}
+
+enum VariableValueKind {
+  string
+  number
+  boolean
+  json
+  file
+  secret // El valor NO esta en la fila: vive cifrado en secrets.
+
+  @@map("variable_value_kind")
+}
+
+enum VersionSource {
+  manual
+  auto_snapshot
+  import
+  restore
+
+  @@map("version_source")
+}
+
+enum ExecutionOutcome {
+  completed
+  timeout
+  cancelled
+  dns_failure
+  tls_failure
+  connection_error
+  blocked_by_policy // Rechazada por el control SSRF antes o durante la conexion.
+  too_large
+  internal_error
+
+  @@map("execution_outcome")
+}
+
+enum BodyPersistence {
+  none // Por defecto. Solo metadatos; el cuerpo nunca toca disco.
+  metadata_only
+  truncated // Primeros N bytes, N configurable por workspace.
+  full // Requiere opt-in explicito y expires_at obligatorio.
+
+  @@map("body_persistence")
+}
+
+enum StorageBackend {
+  object_store
+  local_fs
+  inline_db // Solo para artefactos pequenos y truncados.
+
+  @@map("storage_backend")
+}
+
+enum ArtifactState {
+  stored
+  expired
+  purged
+  discarded_by_policy
+
+  @@map("artifact_state")
+}
+
+enum TestKind {
+  status_code
+  header_present
+  header_value
+  response_time
+  json_schema
+  required_property
+  exact_value
+  body_contains
+  expression
+  script
+  sequence
+
+  @@map("test_kind")
+}
+
+enum TestResult {
+  passed
+  failed
+  skipped
+  errored
+
+  @@map("test_result")
+}
+
+enum RunStatus {
+  queued
+  running
+  passed
+  failed
+  cancelled
+  errored
+
+  @@map("run_status")
+}
+
+enum RunTrigger {
+  manual
+  scheduled
+  ci
+  shared_link
+
+  @@map("run_trigger")
+}
+
+enum NotificationKind {
+  invitation_received
+  invitation_accepted
+  member_joined
+  comment_created
+  comment_mention
+  comment_resolved
+  collection_run_finished
+  version_restored
+  share_link_accessed
+  share_code_locked_out
+  system
+
+  @@map("notification_kind")
+}
+
+enum AuditTargetType {
+  user
+  session
+  workspace
+  workspace_member
+  invitation
+  project
+  collection
+  collection_folder
+  api_request
+  environment
+  variable
+  secret
+  auth_configuration
+  shared_link
+  share_access_code
+  collection_version
+  test_definition
+  collection_run
+  file
+  comment
+  system
+
+  @@map("audit_target_type")
+}
+
+enum FilePurpose {
+  request_body_binary
+  form_field_file
+  client_certificate
+  ca_bundle
+  user_avatar
+  workspace_icon
+  collection_snapshot
+  response_artifact
+  import_source
+  export_bundle
+
+  @@map("file_purpose")
+}
+
+enum FileScanStatus {
+  pending
+  clean
+  rejected
+  skipped
+  failed
+
+  @@map("file_scan_status")
+}
+
+enum RedirectPolicy {
+  follow
+  follow_same_origin
+  never
+
+  @@map("redirect_policy")
+}
+
+enum CookieSameSite {
+  strict
+  lax
+  none
+
+  @@map("cookie_same_site")
+}
+
+enum ImportFormat {
+  postman_v2_0
+  postman_v2_1
+  openapi_3
+  swagger_2
+  curl
+  insomnia
+  har
+  ceiba_native
+
+  @@map("import_format")
+}

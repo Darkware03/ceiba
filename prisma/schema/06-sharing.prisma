@@ -1,0 +1,171 @@
+// =============================================================================
+// CEIBA API Studio - BLOQUE 5 - Comparticion publica y privada con codigo hasheado
+// GENERADO por prisma/tools/dbml-to-prisma.mjs desde docs/schema/ceiba.dbml.
+// NO EDITAR A MANO.
+// =============================================================================
+
+/// SharedLink -> tabla `shared_links`.
+/// CHECK ck_share_no_edit: la enumeracion share_permission no contiene ningun
+/// valor de edicion. Es imposible conceder escritura por enlace porque el tipo
+/// no lo permite (seccion 6: nunca concedas permisos de edicion mediante un
+/// enlace publico o codigo compartido).
+/// CHECK ck_share_exec: allow_execution = false OR permission = 'executor'.
+/// CHECK ck_share_revoked: (state = 'revoked') = (revoked_at IS NOT NULL).
+///
+/// REVOCACION INMEDIATA: la autorizacion de cada peticion se resuelve leyendo
+/// `state`, `expires_at` y `revoked_at` de esta fila. No hay token firmado con
+/// la decision dentro, asi que no existe ventana en la que un JWT ya emitido
+/// siga valiendo despues de revocar. Es la razon de no usar JWT aqui.
+///
+/// Un enlace NO alcanza `secrets` ni `environments` por ninguna ruta de FK.
+///
+model SharedLink {
+  id                 String          @id @default(uuid(7)) @db.Uuid
+  collectionId       String          @map("collection_id") @db.Uuid
+  workspaceId        String          @map("workspace_id") @db.Uuid // Denormalizado para poder revocar todos los enlaces de un workspace sin JOIN.
+  publicSlug         String          @map("public_slug") // Parte visible de la URL. Aleatorio (>=128 bits), NO derivado del nombre ni del id interno. Por si solo NO revela el contenido privado.
+  requiresAccessCode Boolean         @default(false) @map("requires_access_code") // true = coleccion privada con codigo (seccion 6).
+  permission         SharePermission @default(viewer)
+  allowExecution     Boolean         @default(false) @map("allow_execution") // Desactivado por defecto. Solo tiene efecto si permission = executor Y el workspace lo permite.
+  allowExport        Boolean         @default(false) @map("allow_export")
+  includeExamples    Boolean         @default(true) @map("include_examples")
+  state              ShareState      @default(active)
+  expiresAt          DateTime?       @map("expires_at") @db.Timestamptz(6)
+  revokedAt          DateTime?       @map("revoked_at") @db.Timestamptz(6)
+  revokedByUserId    String?         @map("revoked_by_user_id") @db.Uuid
+  maxViews           Int?            @map("max_views") // NULL = sin limite.
+  viewCount          BigInt          @default(0) @map("view_count")
+  lastAccessedAt     DateTime?       @map("last_accessed_at") @db.Timestamptz(6)
+  createdByUserId    String          @map("created_by_user_id") @db.Uuid
+  createdAt          DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime        @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  // --- Relaciones -------------------------------------------------------
+  collection          Collection           @relation("fk_share_collection", fields: [collectionId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_share_collection")
+  createdByUser       User                 @relation("fk_share_creator", fields: [createdByUserId], references: [id], onDelete: Restrict, onUpdate: NoAction, map: "fk_share_creator")
+  revokedByUser       User?                @relation("fk_share_revoker", fields: [revokedByUserId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_share_revoker")
+  workspace           Workspace            @relation("fk_share_ws", fields: [workspaceId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_share_ws")
+  shareAccessAttempts ShareAccessAttempt[] @relation("fk_attempt_link")
+  auditLogs           AuditLog[]           @relation("fk_audit_share")
+  requestHistory      RequestHistory[]     @relation("fk_history_share")
+  collectionRuns      CollectionRun[]      @relation("fk_run_share")
+  shareAccessCodes    ShareAccessCode[]    @relation("fk_sharecode_link")
+
+  @@unique([publicSlug], map: "uq_sharedlink_slug")
+  @@index([collectionId, state], map: "ix_sharedlink_collection")
+  @@index([workspaceId, state], map: "ix_sharedlink_workspace")
+  @@index([state, expiresAt], map: "ix_sharedlink_expiry")
+  @@map("shared_links")
+}
+
+/// ShareAccessCode -> tabla `share_access_codes`.
+/// REQUISITO NO NEGOCIABLE, IMPLEMENTADO AQUI.
+///
+/// No hay columna de codigo en claro. El codigo se entrega una sola vez, en el
+/// momento de generarlo, y despues solo existe como `code_verifier_hash`.
+///
+/// Por que selector + verifier y no un unico hash:
+/// con un unico hash de Argon2id la validacion exigiria recorrer los codigos
+/// vivos y hashear contra cada uno (Argon2 no permite buscar por igualdad). Eso
+/// es O(n) por intento y convierte el login compartido en un amplificador de
+/// DoS. Con selector la busqueda es un indice unico y solo se hashea UNA vez.
+/// El selector no es secreto y no sirve para entrar.
+///
+/// Como se cumple el resto de la seccion 6:
+///  - Generacion criptografica: responsabilidad del backend (CSPRNG). El modelo
+///    no puede imponerla; lo digo en lugar de aparentar que si.
+///  - Limite de intentos: `max_attempts` + `failed_attempt_count` + `locked_until`.
+///  - Rate limiting: `share_access_attempts` da la ventana deslizante por IP.
+///  - Mensajes que no revelan si un codigo existe: la API devuelve la MISMA
+///    respuesta para selector inexistente, hash que no casa, caducado y
+///    revocado. El esquema lo facilita guardando el motivo real solo en
+///    `share_access_attempts.result`, no en la respuesta.
+///  - Revocacion y expiracion efectivas: `state`, `revoked_at`, `expires_at`,
+///    evaluados en cada peticion.
+///  - Rotar y regenerar: `rotated_from_code_id`.
+///  - Nunca en logs ni en URLs: el codigo viaja en el CUERPO de un POST. En la
+///    URL solo va `shared_links.public_slug`, que no es el codigo.
+///  - No concede acceso al workspace: esta tabla cuelga de `shared_links`, que
+///    cuelga de UNA coleccion. No hay ninguna FK desde aqui a `workspace_members`.
+///
+/// CHECK ck_code_attempts: failed_attempt_count >= 0 AND max_attempts > 0.
+/// CHECK ck_code_uses: max_uses IS NULL OR use_count <= max_uses.
+/// CHECK ck_code_hint_len: code_hint IS NULL OR length(code_hint) <= 4.
+/// Indice unico parcial real: un solo codigo activo por enlace si la politica
+/// del workspace lo exige:
+///   CREATE UNIQUE INDEX uq_sharecode_one_active ON share_access_codes
+///     (shared_link_id) WHERE state = 'active';
+///
+model ShareAccessCode {
+  id                 String     @id @default(uuid(7)) @db.Uuid
+  sharedLinkId       String     @map("shared_link_id") @db.Uuid
+  codeSelector       String     @map("code_selector") // Parte NO secreta del codigo, para localizar la fila sin escanear. Aleatoria.
+  codeVerifierHash   Bytes      @map("code_verifier_hash") // HASH del codigo. Argon2id (o bcrypt). EL CODIGO EN CLARO NO SE GUARDA EN NINGUNA PARTE.
+  hashAlgorithm      String     @default("argon2id") @map("hash_algorithm")
+  hashParams         Json       @default("{}") @map("hash_params") // Coste de memoria, iteraciones y paralelismo, para poder rehashear al subir el coste sin invalidar codigos.
+  codeHint           String?    @map("code_hint") // Como maximo los 4 ultimos caracteres, solo para que el propietario distinga entre varios codigos en la interfaz. Opcional y desactivable.
+  label              String?
+  state              ShareState @default(active)
+  maxAttempts        Int        @default(10) @map("max_attempts")
+  failedAttemptCount Int        @default(0) @map("failed_attempt_count")
+  lockedUntil        DateTime?  @map("locked_until") @db.Timestamptz(6) // Bloqueo temporal tras superar max_attempts.
+  maxUses            Int?       @map("max_uses")
+  useCount           BigInt     @default(0) @map("use_count")
+  expiresAt          DateTime?  @map("expires_at") @db.Timestamptz(6)
+  revokedAt          DateTime?  @map("revoked_at") @db.Timestamptz(6)
+  revokedByUserId    String?    @map("revoked_by_user_id") @db.Uuid
+  rotatedFromCodeId  String?    @map("rotated_from_code_id") @db.Uuid // Cadena de rotacion: rotar genera fila nueva y revoca la anterior.
+  createdByUserId    String     @map("created_by_user_id") @db.Uuid
+  createdAt          DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  lastUsedAt         DateTime?  @map("last_used_at") @db.Timestamptz(6)
+
+  // --- Relaciones -------------------------------------------------------
+  createdByUser       User                 @relation("fk_sharecode_creator", fields: [createdByUserId], references: [id], onDelete: Restrict, onUpdate: NoAction, map: "fk_sharecode_creator")
+  sharedLink          SharedLink           @relation("fk_sharecode_link", fields: [sharedLinkId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_sharecode_link")
+  revokedByUser       User?                @relation("fk_sharecode_revoker", fields: [revokedByUserId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_sharecode_revoker")
+  rotatedFromCode     ShareAccessCode?     @relation("fk_sharecode_rotation", fields: [rotatedFromCodeId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_sharecode_rotation")
+  shareAccessAttempts ShareAccessAttempt[] @relation("fk_attempt_code")
+  rotatedToCodes      ShareAccessCode[]    @relation("fk_sharecode_rotation")
+
+  @@unique([codeSelector], map: "uq_sharecode_selector")
+  @@index([sharedLinkId, state], map: "ix_sharecode_link_state")
+  @@index([state, expiresAt], map: "ix_sharecode_expiry")
+  @@index([rotatedFromCodeId], map: "ix_sharecode_rotation")
+  @@map("share_access_codes")
+}
+
+/// ShareAccessAttempt -> tabla `share_access_attempts`.
+/// Tabla de alta rotacion. Decisiones:
+///  - `bigserial` y no uuid: es append-only de alto volumen y nunca se referencia
+///    desde fuera; un entero secuencial da mejor densidad de indice.
+///  - PARTICIONADA POR RANGO sobre attempted_at (mensual) en la migracion real.
+///    DBML no expresa particiones. La purga es DROP PARTITION, no DELETE masivo.
+///  - Retencion: 90 dias por defecto.
+///  - NO guarda el codigo intentado, ni completo ni parcial. Registrar el intento
+///    fallido con el valor probado convertiria el log de seguridad en un
+///    diccionario de codigos.
+/// Sirve a dos requisitos: limitar intentos y registrar accesos y eventos
+/// relevantes (seccion 6).
+///
+model ShareAccessAttempt {
+  id                  BigInt              @id @default(autoincrement())
+  sharedLinkId        String              @map("shared_link_id") @db.Uuid
+  shareAccessCodeId   String?             @map("share_access_code_id") @db.Uuid // NULL si el selector no existia. Registrarlo NULL evita confirmar la existencia del codigo.
+  result              AccessAttemptResult
+  clientIp            String?             @map("client_ip") @db.Inet
+  clientIpPrefix      String?             @map("client_ip_prefix") @db.Inet // IP truncada (/24 IPv4, /64 IPv6) para rate limiting agregado con menos dato personal.
+  userAgentHash       Bytes?              @map("user_agent_hash") // Hash, no el UA completo: suficiente para correlacionar, menos superficie de PII.
+  authenticatedUserId String?             @map("authenticated_user_id") @db.Uuid // Si quien intenta tiene sesion iniciada.
+  attemptedAt         DateTime            @default(now()) @map("attempted_at") @db.Timestamptz(6)
+
+  // --- Relaciones -------------------------------------------------------
+  shareAccessCode   ShareAccessCode? @relation("fk_attempt_code", fields: [shareAccessCodeId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_attempt_code")
+  sharedLink        SharedLink       @relation("fk_attempt_link", fields: [sharedLinkId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_attempt_link")
+  authenticatedUser User?            @relation("fk_attempt_user", fields: [authenticatedUserId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_attempt_user")
+
+  @@index([sharedLinkId, attemptedAt], map: "ix_attempt_link_time")
+  @@index([clientIpPrefix, attemptedAt], map: "ix_attempt_ip_time")
+  @@index([result, attemptedAt], map: "ix_attempt_result_time")
+  @@index([attemptedAt], map: "ix_attempt_time")
+  @@map("share_access_attempts")
+}

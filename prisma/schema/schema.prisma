@@ -1,0 +1,38 @@
+// =============================================================================
+// CEIBA API Studio - Fuente de datos y generador (Prisma 7.10.0)
+//
+// ADR-0003. Version FIJADA a 7.10.0 exacta. `prisma@latest` apunta hoy
+// (2026-10-14) a 8.0.0-rc.22, que es una RELEASE CANDIDATE: comprobado con
+// `npm view prisma dist-tags` -> latest = 8.0.0-rc.22, prev = 7.10.0.
+// Una RC no entra en el nucleo del producto (BRIEF 2.2).
+//
+// Esquema MULTIFICHERO: este directorio entero es el esquema. Se invoca
+// siempre con `--schema prisma/schema` (el directorio), nunca con un fichero
+// suelto, o Prisma solo vera este bloque y creera que no hay modelos.
+//
+// ORIGEN: todos los modelos se GENERAN desde docs/schema/ceiba.dbml con
+// prisma/tools/dbml-to-prisma.mjs. El DBML es la fuente de verdad del diseno;
+// este esquema es su traduccion. No edites los *.prisma de modelos a mano:
+// regenera.
+//
+// LO QUE ESTE FICHERO NO PUEDE EXPRESAR (y por tanto NO esta aqui):
+// restricciones CHECK, indices parciales (WHERE), triggers, citext, NULLS NOT
+// DISTINCT, particionado por rango y FK DEFERRABLE. Todo ello esta en
+// prisma/sql/ y catalogado en MODELO-DATOS-PRISMA.md. Un esquema Prisma que
+// parece completo y ha perdido los CHECK es peor que uno que lo documenta.
+// =============================================================================
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/client"
+}
+
+// AVISO DE MIGRACION A PRISMA 7: `url` ya NO se admite dentro del bloque
+// datasource. Comprobado al validar:
+//   "The datasource property `url` is no longer supported in schema files.
+//    Move connection URLs for Migrate to `prisma.config.ts`"  (P1012)
+// La URL vive en prisma/prisma.config.ts, que la lee de la variable de
+// entorno DATABASE_URL. Ninguna credencial se escribe en el repositorio.
+datasource db {
+  provider = "postgresql"
+}

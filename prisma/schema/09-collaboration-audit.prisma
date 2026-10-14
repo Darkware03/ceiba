@@ -1,0 +1,197 @@
+// =============================================================================
+// CEIBA API Studio - BLOQUE 8 - Colaboracion, auditoria y ficheros
+// GENERADO por prisma/tools/dbml-to-prisma.mjs desde docs/schema/ceiba.dbml.
+// NO EDITAR A MANO.
+// =============================================================================
+
+/// Comment -> tabla `comments`.
+/// Objetivo con FK explicitas nullables y no con un par (target_type, target_id)
+/// polimorfico. Razon: el par polimorfico renuncia a la integridad referencial,
+/// y aqui no hay motivo para renunciar a ella (son solo tres destinos posibles).
+/// CHECK ck_comment_target: exactamente una de
+///   (collection_id, collection_folder_id, api_request_id) no nula.
+/// Borrado logico: un comentario borrado dentro de un hilo debe dejar el hilo
+/// legible, por eso deleted_at y no DELETE.
+///
+model Comment {
+  id                 String    @id @default(uuid(7)) @db.Uuid
+  workspaceId        String    @map("workspace_id") @db.Uuid
+  authorUserId       String?   @map("author_user_id") @db.Uuid // NULL si la cuenta fue borrada; el comentario queda como de usuario eliminado.
+  parentCommentId    String?   @map("parent_comment_id") @db.Uuid // Hilos de respuesta de profundidad arbitraria.
+  collectionId       String?   @map("collection_id") @db.Uuid
+  collectionFolderId String?   @map("collection_folder_id") @db.Uuid
+  apiRequestId       String?   @map("api_request_id") @db.Uuid
+  bodyMarkdown       String    @map("body_markdown")
+  anchor             Json? // Anclaje opcional dentro del recurso, p.ej. una cabecera concreta.
+  mentionedUserIds   String[]  @map("mentioned_user_ids") @db.Uuid // Array uuid[] en la migracion real. DBML no expresa tipos array.
+  isEdited           Boolean   @default(false) @map("is_edited")
+  resolvedAt         DateTime? @map("resolved_at") @db.Timestamptz(6)
+  resolvedByUserId   String?   @map("resolved_by_user_id") @db.Uuid
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
+  deletedAt          DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  // --- Relaciones -------------------------------------------------------
+  authorUser       User?             @relation("fk_comment_author", fields: [authorUserId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_comment_author")
+  collection       Collection?       @relation("fk_comment_collection", fields: [collectionId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_comment_collection")
+  collectionFolder CollectionFolder? @relation("fk_comment_folder", fields: [collectionFolderId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_comment_folder")
+  parentComment    Comment?          @relation("fk_comment_parent", fields: [parentCommentId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_comment_parent")
+  apiRequest       ApiRequest?       @relation("fk_comment_request", fields: [apiRequestId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_comment_request")
+  resolvedByUser   User?             @relation("fk_comment_resolver", fields: [resolvedByUserId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_comment_resolver")
+  workspace        Workspace         @relation("fk_comment_ws", fields: [workspaceId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_comment_ws")
+  childComments    Comment[]         @relation("fk_comment_parent")
+  notifications    Notification[]    @relation("fk_notif_comment")
+
+  @@index([collectionId, createdAt], map: "ix_comment_collection")
+  @@index([apiRequestId, createdAt], map: "ix_comment_request")
+  @@index([collectionFolderId, createdAt], map: "ix_comment_folder")
+  @@index([parentCommentId], map: "ix_comment_parent")
+  @@index([workspaceId, createdAt], map: "ix_comment_ws_time")
+  @@map("comments")
+}
+
+/// Notification -> tabla `notifications`.
+/// Indice parcial real para el contador de no leidas, que es la consulta mas
+/// frecuente de toda la aplicacion:
+///   CREATE INDEX ix_notif_user_unread ON notifications (recipient_user_id)
+///     WHERE read_at IS NULL AND dismissed_at IS NULL;
+/// Todas las FK a recursos son ON DELETE CASCADE: una notificacion sobre algo
+/// que ya no existe es ruido, no historia. La historia esta en audit_logs.
+///
+model Notification {
+  id              BigInt           @id @default(autoincrement())
+  recipientUserId String           @map("recipient_user_id") @db.Uuid
+  workspaceId     String?          @map("workspace_id") @db.Uuid
+  kind            NotificationKind
+  title           String
+  body            String?
+  payload         Json             @default("{}") // Identificadores para construir el enlace. PROHIBIDO incluir secretos o codigos de acceso.
+  actorUserId     String?          @map("actor_user_id") @db.Uuid
+  collectionId    String?          @map("collection_id") @db.Uuid
+  apiRequestId    String?          @map("api_request_id") @db.Uuid
+  collectionRunId String?          @map("collection_run_id") @db.Uuid
+  commentId       String?          @map("comment_id") @db.Uuid
+  invitationId    String?          @map("invitation_id") @db.Uuid
+  readAt          DateTime?        @map("read_at") @db.Timestamptz(6)
+  dismissedAt     DateTime?        @map("dismissed_at") @db.Timestamptz(6)
+  emailedAt       DateTime?        @map("emailed_at") @db.Timestamptz(6)
+  createdAt       DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  expiresAt       DateTime         @map("expires_at") @db.Timestamptz(6)
+
+  // --- Relaciones -------------------------------------------------------
+  actorUser     User?          @relation("fk_notif_actor", fields: [actorUserId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_notif_actor")
+  collection    Collection?    @relation("fk_notif_collection", fields: [collectionId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_notif_collection")
+  comment       Comment?       @relation("fk_notif_comment", fields: [commentId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_notif_comment")
+  invitation    Invitation?    @relation("fk_notif_invitation", fields: [invitationId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_notif_invitation")
+  recipientUser User           @relation("fk_notif_recipient", fields: [recipientUserId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_notif_recipient")
+  apiRequest    ApiRequest?    @relation("fk_notif_request", fields: [apiRequestId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_notif_request")
+  collectionRun CollectionRun? @relation("fk_notif_run", fields: [collectionRunId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_notif_run")
+  workspace     Workspace?     @relation("fk_notif_ws", fields: [workspaceId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_notif_ws")
+
+  @@index([recipientUserId, createdAt], map: "ix_notif_user_time")
+  @@index([recipientUserId, readAt], map: "ix_notif_user_unread")
+  @@index([workspaceId, createdAt], map: "ix_notif_ws_time")
+  @@index([expiresAt], map: "ix_notif_expiry")
+  @@map("notifications")
+}
+
+/// AuditLog -> tabla `audit_logs`.
+/// APPEND-ONLY. Sin deleted_at, sin updated_at, sin UPDATE.
+/// En la migracion real se revocan UPDATE y DELETE al rol de la aplicacion y se
+/// concede solo INSERT y SELECT. Un registro de auditoria que la aplicacion
+/// puede reescribir no es un registro de auditoria.
+///
+/// `action` es text y no enum deliberadamente: las acciones auditables crecen en
+/// cada funcionalidad nueva, y un enum obligaria a una migracion ALTER TYPE por
+/// cada verbo. A cambio, CHECK de formato:
+///   CHECK (action ~ '^[a-z][a-z0-9_]*(.[a-z][a-z0-9_]*)+$')
+/// `target_type` SI es enum porque el conjunto de tipos de recurso es cerrado.
+///
+/// Las FK a actor y objetivo son ON DELETE SET NULL, nunca CASCADE: borrar un
+/// usuario no puede borrar la evidencia de lo que hizo. Por eso existe
+/// `target_label`, que conserva el nombre aunque el objetivo desaparezca.
+///
+/// PARTICIONADA POR RANGO sobre occurred_at (mensual). Retencion configurable
+/// por workspace (retention_policies.audit_retention_days), por defecto 365 dias.
+///
+model AuditLog {
+  id                 BigInt          @id @default(autoincrement())
+  workspaceId        String?         @map("workspace_id") @db.Uuid // NULL para eventos de plataforma sin workspace.
+  actorUserId        String?         @map("actor_user_id") @db.Uuid // NULL = sistema, job programado o actor anonimo por enlace compartido.
+  actorKind          String          @default("user") @map("actor_kind") // user | system | job | share_visitor.
+  actorIp            String?         @map("actor_ip") @db.Inet
+  actorUserAgentHash Bytes?          @map("actor_user_agent_hash")
+  sessionId          String?         @map("session_id") @db.Uuid
+  sharedLinkId       String?         @map("shared_link_id") @db.Uuid // Trazabilidad de acciones hechas a traves de un enlace.
+  action             String // Verbo en minusculas con puntos: collection.published, share_code.rotated, secret.rotated...
+  targetType         AuditTargetType @map("target_type")
+  targetId           String?         @map("target_id") @db.Uuid
+  targetLabel        String?         @map("target_label") // Nombre legible en el momento del hecho. Sobrevive al renombrado y al borrado del objetivo.
+  outcome            String          @default("success") // success | denied | error.
+  metadata           Json            @default("{}") // Contexto del hecho. PROHIBIDO escribir aqui secretos, codigos de acceso, tokens o cuerpos de respuesta. Validado por una lista blanca de claves en la capa de auditoria.
+  occurredAt         DateTime        @default(now()) @map("occurred_at") @db.Timestamptz(6)
+
+  // --- Relaciones -------------------------------------------------------
+  actorUser  User?       @relation("fk_audit_actor", fields: [actorUserId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_audit_actor")
+  session    Session?    @relation("fk_audit_session", fields: [sessionId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_audit_session")
+  sharedLink SharedLink? @relation("fk_audit_share", fields: [sharedLinkId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_audit_share")
+  workspace  Workspace?  @relation("fk_audit_ws", fields: [workspaceId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_audit_ws")
+
+  @@index([workspaceId, occurredAt], map: "ix_audit_ws_time")
+  @@index([actorUserId, occurredAt], map: "ix_audit_actor_time")
+  @@index([targetType, targetId, occurredAt], map: "ix_audit_target")
+  @@index([action, occurredAt], map: "ix_audit_action_time")
+  @@index([occurredAt], map: "ix_audit_time")
+  @@map("audit_logs")
+}
+
+/// File -> tabla `files`.
+/// Metadatos de ficheros; los bytes viven en el almacen de objetos.
+/// `files` NO guarda claves privadas ni material criptografico: esas van a
+/// `secrets` cifradas. Aqui van el certificado publico, el bundle de CA, los
+/// adjuntos de multipart, las instantaneas de version y los ficheros importados.
+/// CHECK ck_file_size: size_bytes >= 0 AND size_bytes <= 104857600 (limite de
+/// tamano de la seccion 16; el valor exacto es configurable por despliegue).
+/// CHECK ck_file_public: is_public = false OR purpose IN
+///   ('user_avatar','workspace_icon').
+/// Un fichero con scan_status <> 'clean' no se sirve nunca.
+///
+model File {
+  id               String         @id @default(uuid(7)) @db.Uuid
+  workspaceId      String?        @map("workspace_id") @db.Uuid // NULL para ficheros de plataforma, p.ej. avatares de usuario.
+  ownerUserId      String?        @map("owner_user_id") @db.Uuid
+  purpose          FilePurpose
+  storage          StorageBackend @default(object_store)
+  storageKey       String         @map("storage_key")
+  originalFilename String?        @map("original_filename")
+  contentType      String         @default("application/octet-stream") @map("content_type")
+  sizeBytes        BigInt         @map("size_bytes")
+  checksumSha256   Bytes          @map("checksum_sha256")
+  scanStatus       FileScanStatus @default(pending) @map("scan_status")
+  scanDetail       String?        @map("scan_detail")
+  isPublic         Boolean        @default(false) @map("is_public") // Solo avatares e iconos. Un fichero adjunto a una solicitud NUNCA es publico.
+  referenceCount   Int            @default(0) @map("reference_count") // Deduplicacion por checksum: varios cuerpos pueden apuntar al mismo objeto.
+  uploadedAt       DateTime       @default(now()) @map("uploaded_at") @db.Timestamptz(6)
+  expiresAt        DateTime?      @map("expires_at") @db.Timestamptz(6) // NULL = permanente (certificado, adjunto de una solicitud viva). No NULL para importaciones y exportaciones temporales.
+  deletedAt        DateTime?      @map("deleted_at") @db.Timestamptz(6)
+  purgedAt         DateTime?      @map("purged_at") @db.Timestamptz(6)
+
+  // --- Relaciones -------------------------------------------------------
+  ownerUser                     User?               @relation("fk_file_owner", fields: [ownerUserId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_file_owner")
+  workspace                     Workspace?          @relation("fk_file_ws", fields: [workspaceId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_file_ws")
+  requestBodies                 RequestBody[]       @relation("fk_body_file")
+  requestBodyFields             RequestBodyField[]  @relation("fk_bodyfield_file")
+  clientCertificatesCaBundle    ClientCertificate[] @relation("fk_cert_ca")
+  clientCertificatesCertificate ClientCertificate[] @relation("fk_cert_file")
+  collections                   Collection[]        @relation("fk_collection_source")
+  users                         User[]              @relation("fk_users_avatar")
+  collectionVersions            CollectionVersion[] @relation("fk_version_file")
+  workspaces                    Workspace[]         @relation("fk_ws_icon")
+
+  @@unique([storageKey], map: "uq_files_storage_key")
+  @@index([workspaceId, purpose], map: "ix_files_ws_purpose")
+  @@index([checksumSha256], map: "ix_files_checksum")
+  @@index([scanStatus, uploadedAt], map: "ix_files_scan_queue")
+  @@index([expiresAt], map: "ix_files_expiry")
+  @@map("files")
+}

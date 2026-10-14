@@ -1,0 +1,384 @@
+// =============================================================================
+// CEIBA API Studio - BLOQUE 2 - Organizacion: proyectos, colecciones, carpetas, solicitudes
+// GENERADO por prisma/tools/dbml-to-prisma.mjs desde docs/schema/ceiba.dbml.
+// NO EDITAR A MANO.
+// =============================================================================
+
+/// Project -> tabla `projects`.
+/// Indice unico real parcial: WHERE deleted_at IS NULL.
+model Project {
+  id              String          @id @default(uuid(7)) @db.Uuid
+  workspaceId     String          @map("workspace_id") @db.Uuid
+  slug            String
+  name            String
+  description     String?
+  color           String?
+  sortKey         String          @map("sort_key") // Rank fraccionario lexicografico. Reordenar = reescribir UNA fila.
+  status          LifecycleStatus @default(active)
+  createdByUserId String?         @map("created_by_user_id") @db.Uuid
+  createdAt       DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime        @default(now()) @map("updated_at") @db.Timestamptz(6)
+  deletedAt       DateTime?       @map("deleted_at") @db.Timestamptz(6)
+  deletedByUserId String?         @map("deleted_by_user_id") @db.Uuid
+
+  // --- Relaciones -------------------------------------------------------
+  createdByUser User?        @relation("fk_project_creator", fields: [createdByUserId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_project_creator")
+  deletedByUser User?        @relation("fk_project_deleter", fields: [deletedByUserId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_project_deleter")
+  workspace     Workspace    @relation("fk_project_ws", fields: [workspaceId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_project_ws")
+  collections   Collection[] @relation("fk_collection_project")
+
+  @@unique([workspaceId, slug], map: "uq_projects_ws_slug")
+  @@index([workspaceId, status, sortKey], map: "ix_projects_ws_order")
+  @@map("projects")
+}
+
+/// Collection -> tabla `collections`.
+/// SEPARACION METADATO/SECRETO (requisito no negociable):
+/// esta tabla NO tiene ninguna columna de credencial y NO alcanza `secrets` por
+/// ninguna ruta de clave foranea. El unico puente posible es
+/// collections -> auth_configurations -> auth_credentials -> secrets, y
+/// `auth_credentials` es precisamente la arista que el serializador de
+/// publicacion y exportacion tiene PROHIBIDO recorrer.
+/// `ix_collections_name_trgm` requiere la extension pg_trgm y en la migracion
+/// real es: USING gin (name gin_trgm_ops).
+///
+model Collection {
+  id                         String               @id @default(uuid(7)) @db.Uuid
+  workspaceId                String               @map("workspace_id") @db.Uuid // Siempre presente: el workspace es la frontera de autorizacion.
+  projectId                  String?              @map("project_id") @db.Uuid // NULL = coleccion colgada directamente del workspace.
+  slug                       String
+  name                       String
+  description                String? // Documentacion en Markdown. Metadato publicable.
+  visibility                 CollectionVisibility @default(private)
+  defaultAuthMode            AuthMode             @default(none) @map("default_auth_mode")
+  defaultAuthConfigurationId String?              @map("default_auth_configuration_id") @db.Uuid // Forma de la auth, NO el secreto. Ver auth_credentials.
+  defaultTimeoutMs           Int                  @default(30000) @map("default_timeout_ms")
+  defaultRedirectPolicy      RedirectPolicy       @default(follow) @map("default_redirect_policy")
+  defaultMaxRedirects        Int                  @default(5) @map("default_max_redirects") @db.SmallInt
+  tlsVerifyPeer              Boolean              @default(true) @map("tls_verify_peer")
+  variablesDoc               Json                 @default("{}") @map("variables_doc") // Solo documentacion de variables esperadas. NUNCA valores secretos.
+  schemaFormat               ImportFormat?        @map("schema_format") // Formato de origen si vino de una importacion.
+  sourceFileId               String?              @map("source_file_id") @db.Uuid // Fichero original importado, para trazabilidad.
+  requestCount               Int                  @default(0) @map("request_count") // Contador denormalizado mantenido por trigger. Evita COUNT(*) en colecciones de miles de solicitudes.
+  sortKey                    String               @map("sort_key")
+  status                     LifecycleStatus      @default(active)
+  currentVersionNumber       Int                  @default(0) @map("current_version_number")
+  lockVersion                Int                  @default(0) @map("lock_version") // Bloqueo optimista: evita sobrescrituras silenciosas (seccion 5).
+  createdByUserId            String?              @map("created_by_user_id") @db.Uuid
+  createdAt                  DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt                  DateTime             @default(now()) @map("updated_at") @db.Timestamptz(6)
+  deletedAt                  DateTime?            @map("deleted_at") @db.Timestamptz(6)
+  deletedByUserId            String?              @map("deleted_by_user_id") @db.Uuid
+
+  // --- Relaciones -------------------------------------------------------
+  defaultAuthConfiguration AuthConfiguration?  @relation("fk_collection_auth", fields: [defaultAuthConfigurationId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_collection_auth")
+  createdByUser            User?               @relation("fk_collection_creator", fields: [createdByUserId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_collection_creator")
+  deletedByUser            User?               @relation("fk_collection_deleter", fields: [deletedByUserId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_collection_deleter")
+  project                  Project?            @relation("fk_collection_project", fields: [projectId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_collection_project")
+  sourceFile               File?               @relation("fk_collection_source", fields: [sourceFileId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_collection_source")
+  workspace                Workspace           @relation("fk_collection_ws", fields: [workspaceId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_collection_ws")
+  comments                 Comment[]           @relation("fk_comment_collection")
+  environments             Environment[]       @relation("fk_env_collection")
+  collectionFolders        CollectionFolder[]  @relation("fk_folder_collection")
+  requestHistory           RequestHistory[]    @relation("fk_history_collection")
+  notifications            Notification[]      @relation("fk_notif_collection")
+  apiRequests              ApiRequest[]        @relation("fk_request_collection")
+  collectionRuns           CollectionRun[]     @relation("fk_run_collection")
+  scopedVariables          ScopedVariable[]    @relation("fk_scopedvar_collection")
+  sharedLinks              SharedLink[]        @relation("fk_share_collection")
+  testDefinitions          TestDefinition[]    @relation("fk_test_collection")
+  collectionVersions       CollectionVersion[] @relation("fk_version_collection")
+
+  @@unique([workspaceId, slug], map: "uq_collections_ws_slug")
+  @@index([workspaceId, projectId, status, sortKey], map: "ix_collections_tree")
+  @@index([visibility, status], map: "ix_collections_visibility")
+  @@index([name(ops: raw("gin_trgm_ops"))], map: "ix_collections_name_trgm", type: Gin)
+  @@map("collections")
+}
+
+/// CollectionFolder -> tabla `collection_folders`.
+/// JERARQUIA DE PROFUNDIDAD ARBITRARIA: `parent_folder_id` es la verdad;
+/// `materialized_path` y `depth` son derivados mantenidos por trigger.
+/// Es una desnormalizacion deliberada y acotada, justificada en MODELO-DATOS.md:
+/// sin ella, pintar el arbol de una coleccion de miles de nodos exige un
+/// WITH RECURSIVE por expansion.
+/// Consulta de subarbol: WHERE materialized_path LIKE :prefijo || %
+///   -> usa ix_folders_path con text_pattern_ops en la migracion real.
+/// CHECK ck_folder_depth: depth >= 0 AND depth <= 32.
+/// CHECK ck_folder_not_self: id <> parent_folder_id.
+/// Trigger anti-ciclo: un movimiento no puede colocar una carpeta dentro de su
+/// propio subarbol (comprobacion por prefijo de materialized_path).
+/// El unico indice que necesita ser parcial es uq_folder_sibling_name:
+///   WHERE deleted_at IS NULL.
+///
+model CollectionFolder {
+  id                  String    @id @default(uuid(7)) @db.Uuid
+  collectionId        String    @map("collection_id") @db.Uuid
+  parentFolderId      String?   @map("parent_folder_id") @db.Uuid // NULL = carpeta raiz de la coleccion. Autorreferencia -> profundidad arbitraria.
+  name                String
+  description         String?
+  materializedPath    String    @map("materialized_path") // Ruta denormalizada de ids, p.ej. /<uuid>/<uuid>/. Permite subarbol en UNA consulta por prefijo.
+  depth               Int       @default(0) @db.SmallInt // Profundidad derivada. CHECK <= 32 para acotar la recursion.
+  authMode            AuthMode  @default(inherit) @map("auth_mode")
+  authConfigurationId String?   @map("auth_configuration_id") @db.Uuid
+  sortKey             String    @map("sort_key")
+  lockVersion         Int       @default(0) @map("lock_version")
+  createdByUserId     String?   @map("created_by_user_id") @db.Uuid
+  createdAt           DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
+  deletedAt           DateTime? @map("deleted_at") @db.Timestamptz(6)
+  deletedByUserId     String?   @map("deleted_by_user_id") @db.Uuid
+
+  // --- Relaciones -------------------------------------------------------
+  authConfiguration AuthConfiguration? @relation("fk_folder_auth", fields: [authConfigurationId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_folder_auth")
+  collection        Collection         @relation("fk_folder_collection", fields: [collectionId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_folder_collection")
+  createdByUser     User?              @relation("fk_folder_creator", fields: [createdByUserId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_folder_creator")
+  deletedByUser     User?              @relation("fk_folder_deleter", fields: [deletedByUserId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_folder_deleter")
+  parentFolder      CollectionFolder?  @relation("fk_folder_parent", fields: [parentFolderId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_folder_parent")
+  comments          Comment[]          @relation("fk_comment_folder")
+  childFolders      CollectionFolder[] @relation("fk_folder_parent")
+  apiRequests       ApiRequest[]       @relation("fk_request_folder")
+  collectionRuns    CollectionRun[]    @relation("fk_run_folder")
+
+  @@unique([collectionId, parentFolderId, name], map: "uq_folder_sibling_name")
+  @@index([collectionId, parentFolderId, sortKey], map: "ix_folders_siblings")
+  @@index([materializedPath(ops: raw("text_pattern_ops"))], map: "ix_folders_path")
+  @@index([collectionId], map: "ix_folders_collection")
+  @@map("collection_folders")
+}
+
+/// ApiRequest -> tabla `api_requests`.
+/// ESCALA: esta es la tabla que crece a miles de filas por coleccion. Por eso:
+///  - El cuerpo vive en `request_bodies` (1:1). Listar el arbol no arrastra
+///    payloads grandes ni paga el coste de TOAST.
+///  - `ix_requests_siblings` sirve la paginacion por teclado (keyset) del arbol:
+///    WHERE collection_id = ? AND folder_id IS NOT DISTINCT FROM ? AND sort_key > ?
+///    ORDER BY sort_key LIMIT 100.
+///  - Los indices trigram cubren la busqueda por nombre y por URL (seccion 11).
+/// CHECK ck_request_custom_verb:
+///   (method = 'CUSTOM') = (method_custom IS NOT NULL).
+/// CHECK ck_request_timeout: timeout_ms IS NULL OR timeout_ms BETWEEN 1 AND 600000.
+/// uq_requests_external_ref es parcial: WHERE external_ref IS NOT NULL
+///   AND deleted_at IS NULL.
+///
+model ApiRequest {
+  id                  String          @id @default(uuid(7)) @db.Uuid // IDENTIFICADOR ESTABLE DEL ENDPOINT. Inmutable, independiente del nombre, sobrevive a renombrados, movimientos entre carpetas y restauraciones de version (seccion 11).
+  collectionId        String          @map("collection_id") @db.Uuid
+  folderId            String?         @map("folder_id") @db.Uuid // NULL = solicitud en la raiz de la coleccion.
+  externalRef         String?         @map("external_ref") // Id del sistema de origen (Postman, OpenAPI operationId) para reimportar sin duplicar.
+  name                String
+  description         String?
+  method              HttpMethod      @default(GET)
+  methodCustom        String?         @map("method_custom") // Verbo real cuando method = CUSTOM.
+  urlTemplate         String          @map("url_template") // URL con marcadores {{var}} sin resolver. Jamas se guarda resuelta.
+  bodyMode            BodyMode        @default(none) @map("body_mode")
+  authMode            AuthMode        @default(inherit) @map("auth_mode")
+  authConfigurationId String?         @map("auth_configuration_id") @db.Uuid
+  timeoutMs           Int?            @map("timeout_ms") // NULL = hereda de la coleccion.
+  redirectPolicy      RedirectPolicy? @map("redirect_policy")
+  maxRedirects        Int?            @map("max_redirects") @db.SmallInt
+  tlsVerifyPeer       Boolean?        @map("tls_verify_peer")
+  clientCertificateId String?         @map("client_certificate_id") @db.Uuid
+  preRequestScript    String?         @map("pre_request_script") // Se ejecuta en sandbox aislado. El modelo solo lo almacena.
+  postResponseScript  String?         @map("post_response_script")
+  settings            Json            @default("{}")
+  sortKey             String          @map("sort_key")
+  lockVersion         Int             @default(0) @map("lock_version")
+  lastExecutedAt      DateTime?       @map("last_executed_at") @db.Timestamptz(6)
+  createdByUserId     String?         @map("created_by_user_id") @db.Uuid
+  createdAt           DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime        @default(now()) @map("updated_at") @db.Timestamptz(6)
+  deletedAt           DateTime?       @map("deleted_at") @db.Timestamptz(6)
+  deletedByUserId     String?         @map("deleted_by_user_id") @db.Uuid
+
+  // --- Relaciones -------------------------------------------------------
+  authConfiguration AuthConfiguration? @relation("fk_request_auth", fields: [authConfigurationId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_request_auth")
+  clientCertificate ClientCertificate? @relation("fk_request_cert", fields: [clientCertificateId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_request_cert")
+  collection        Collection         @relation("fk_request_collection", fields: [collectionId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_request_collection")
+  createdByUser     User?              @relation("fk_request_creator", fields: [createdByUserId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_request_creator")
+  deletedByUser     User?              @relation("fk_request_deleter", fields: [deletedByUserId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_request_deleter")
+  folder            CollectionFolder?  @relation("fk_request_folder", fields: [folderId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_request_folder")
+  requestBodies     RequestBody?       @relation("fk_body_request")
+  comments          Comment[]          @relation("fk_comment_request")
+  requestHeaders    RequestHeader[]    @relation("fk_header_request")
+  requestHistory    RequestHistory[]   @relation("fk_history_request")
+  notifications     Notification[]     @relation("fk_notif_request")
+  requestParams     RequestParam[]     @relation("fk_param_request")
+  requestTags       RequestTag[]       @relation("fk_reqtag_request")
+  scopedVariables   ScopedVariable[]   @relation("fk_scopedvar_request")
+  testDefinitions   TestDefinition[]   @relation("fk_test_request")
+  testRuns          TestRun[]          @relation("fk_testrun_request")
+
+  @@unique([collectionId, externalRef], map: "uq_requests_external_ref")
+  @@index([collectionId, folderId, sortKey], map: "ix_requests_siblings")
+  @@index([collectionId, deletedAt], map: "ix_requests_collection_live")
+  @@index([collectionId, method], map: "ix_requests_method")
+  @@index([name(ops: raw("gin_trgm_ops"))], map: "ix_requests_name_trgm", type: Gin)
+  @@index([urlTemplate(ops: raw("gin_trgm_ops"))], map: "ix_requests_url_trgm", type: Gin)
+  @@map("api_requests")
+}
+
+/// RequestHeader -> tabla `request_headers`.
+/// CHECK ck_header_secret_xor:
+///   (is_secret AND value IS NULL AND secret_id IS NOT NULL)
+///   OR (NOT is_secret AND secret_id IS NULL)
+/// Garantiza que una cabecera marcada como secreta NO puede tener texto en claro
+/// en la fila. Es el control que impide que un Authorization: Bearer ... acabe en
+/// un export o en un snapshot de version.
+/// Borrado FISICO en cascada con la solicitud: es detalle dependiente, no tiene
+/// vida propia ni necesita recuperacion independiente.
+///
+model RequestHeader {
+  id           String   @id @default(uuid(7)) @db.Uuid
+  apiRequestId String   @map("api_request_id") @db.Uuid
+  name         String // Nombre de cabecera. Comparacion case-insensitive por RFC 9110.
+  value        String? // NULL cuando is_secret = true: el valor vive cifrado en secrets.
+  secretId     String?  @map("secret_id") @db.Uuid // Obligatorio si is_secret = true.
+  description  String?
+  isSecret     Boolean  @default(false) @map("is_secret")
+  isEnabled    Boolean  @default(true) @map("is_enabled")
+  sortOrder    Int      @default(0) @map("sort_order")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  // --- Relaciones -------------------------------------------------------
+  apiRequest ApiRequest @relation("fk_header_request", fields: [apiRequestId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_header_request")
+  secret     Secret?    @relation("fk_header_secret", fields: [secretId], references: [id], onDelete: Restrict, onUpdate: NoAction, map: "fk_header_secret")
+
+  @@index([apiRequestId, sortOrder], map: "ix_headers_request_order")
+  @@index([apiRequestId, name], map: "ix_headers_request_name")
+  @@index([secretId], map: "ix_headers_secret")
+  @@map("request_headers")
+}
+
+/// RequestParam -> tabla `request_params`.
+/// Separada de request_headers a proposito: un parametro de ruta (kind='path')
+/// y una cabecera tienen reglas de resolucion, codificacion y unicidad distintas.
+/// Fundirlas en una tabla generica obligaria a un CHECK condicional por tipo.
+/// CHECK ck_param_secret_xor: mismo invariante que en request_headers.
+/// CHECK ck_param_path_enabled: kind <> 'path' OR is_enabled = true
+///   (un parametro de ruta no se puede desactivar sin romper la URL).
+///
+model RequestParam {
+  id           String    @id @default(uuid(7)) @db.Uuid
+  apiRequestId String    @map("api_request_id") @db.Uuid
+  kind         ParamKind @default(query)
+  name         String
+  value        String? // NULL cuando is_secret = true.
+  secretId     String?   @map("secret_id") @db.Uuid
+  description  String?
+  isSecret     Boolean   @default(false) @map("is_secret")
+  isEnabled    Boolean   @default(true) @map("is_enabled")
+  sortOrder    Int       @default(0) @map("sort_order")
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  // --- Relaciones -------------------------------------------------------
+  apiRequest ApiRequest @relation("fk_param_request", fields: [apiRequestId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_param_request")
+  secret     Secret?    @relation("fk_param_secret", fields: [secretId], references: [id], onDelete: Restrict, onUpdate: NoAction, map: "fk_param_secret")
+
+  @@index([apiRequestId, kind, sortOrder], map: "ix_params_request_order")
+  @@index([secretId], map: "ix_params_secret")
+  @@map("request_params")
+}
+
+/// RequestBody -> tabla `request_bodies`.
+/// Tabla separada de api_requests por rendimiento, no por teoria: mantiene las
+/// filas de api_requests estrechas para que el listado del arbol de una coleccion
+/// de miles de solicitudes no toque paginas con payloads de cientos de KB.
+/// CHECK ck_body_mode_shape:
+///   (mode IN ('raw_json','raw_text','raw_xml','raw_html','graphql')
+///      AND binary_file_id IS NULL)
+///   OR (mode = 'binary_file' AND raw_content IS NULL AND binary_file_id IS NOT NULL)
+///   OR (mode IN ('none','form_urlencoded','multipart_form_data','custom')
+///      AND raw_content IS NULL AND binary_file_id IS NULL)
+/// Los campos de formulario NO van aqui: van en request_body_fields, porque son
+/// una lista ordenada con secretos y ficheros por fila.
+///
+model RequestBody {
+  id               String   @id @default(uuid(7)) @db.Uuid
+  apiRequestId     String   @map("api_request_id") @db.Uuid // Relacion 1:1 estricta.
+  mode             BodyMode @default(none)
+  contentType      String?  @map("content_type") // Sobrescribe el content-type derivado del modo.
+  rawContent       String?  @map("raw_content") // Solo para modos raw_*/graphql. Puede ser grande -> TOAST.
+  graphqlVariables Json?    @map("graphql_variables")
+  binaryFileId     String?  @map("binary_file_id") @db.Uuid // Solo para mode = binary_file.
+  charset          String   @default("utf-8")
+  sizeBytes        BigInt   @default(0) @map("size_bytes")
+  checksumSha256   Bytes?   @map("checksum_sha256")
+  updatedAt        DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  // --- Relaciones -------------------------------------------------------
+  binaryFile        File?              @relation("fk_body_file", fields: [binaryFileId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_body_file")
+  apiRequest        ApiRequest         @relation("fk_body_request", fields: [apiRequestId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_body_request")
+  requestBodyFields RequestBodyField[] @relation("fk_bodyfield_body")
+
+  @@unique([apiRequestId], map: "uq_bodies_request")
+  @@index([binaryFileId], map: "ix_bodies_file")
+  @@map("request_bodies")
+}
+
+/// RequestBodyField -> tabla `request_body_fields`.
+/// Normaliza los campos de application/x-www-form-urlencoded y multipart/form-data
+/// (seccion 7). Guardarlos como jsonb impediria tanto el FK a `files` como el FK a
+/// `secrets`, y con ello la separacion metadato/secreto en subidas de ficheros.
+/// CHECK ck_bodyfield_xor: como maximo uno de (field_value, secret_id, file_id)
+/// no nulo, y secret_id NOT NULL si is_secret.
+///
+model RequestBodyField {
+  id            String  @id @default(uuid(7)) @db.Uuid
+  requestBodyId String  @map("request_body_id") @db.Uuid
+  fieldName     String  @map("field_name")
+  fieldValue    String? @map("field_value") // NULL si is_secret o si es un campo de tipo fichero.
+  secretId      String? @map("secret_id") @db.Uuid
+  fileId        String? @map("file_id") @db.Uuid // Solo en multipart_form_data.
+  contentType   String? @map("content_type")
+  isSecret      Boolean @default(false) @map("is_secret")
+  isEnabled     Boolean @default(true) @map("is_enabled")
+  sortOrder     Int     @default(0) @map("sort_order")
+
+  // --- Relaciones -------------------------------------------------------
+  requestBody RequestBody @relation("fk_bodyfield_body", fields: [requestBodyId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_bodyfield_body")
+  file        File?       @relation("fk_bodyfield_file", fields: [fileId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_bodyfield_file")
+  secret      Secret?     @relation("fk_bodyfield_secret", fields: [secretId], references: [id], onDelete: Restrict, onUpdate: NoAction, map: "fk_bodyfield_secret")
+
+  @@index([requestBodyId, sortOrder], map: "ix_bodyfields_order")
+  @@index([secretId], map: "ix_bodyfields_secret")
+  @@index([fileId], map: "ix_bodyfields_file")
+  @@map("request_body_fields")
+}
+
+/// Tag -> tabla `tags`.
+/// Etiquetas de la seccion 11, con alcance de workspace.
+model Tag {
+  id          String   @id @default(uuid(7)) @db.Uuid
+  workspaceId String   @map("workspace_id") @db.Uuid
+  name        String
+  color       String?
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  // --- Relaciones -------------------------------------------------------
+  workspace   Workspace    @relation("fk_tag_ws", fields: [workspaceId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_tag_ws")
+  requestTags RequestTag[] @relation("fk_reqtag_tag")
+
+  @@unique([workspaceId, name], map: "uq_tags_ws_name")
+  @@map("tags")
+}
+
+/// RequestTag -> tabla `request_tags`.
+/// Tabla puente N:M con PK compuesta. Borrado fisico en cascada por ambos lados.
+model RequestTag {
+  apiRequestId   String   @map("api_request_id") @db.Uuid
+  tagId          String   @map("tag_id") @db.Uuid
+  taggedAt       DateTime @default(now()) @map("tagged_at") @db.Timestamptz(6)
+  taggedByUserId String?  @map("tagged_by_user_id") @db.Uuid
+
+  // --- Relaciones -------------------------------------------------------
+  apiRequest   ApiRequest @relation("fk_reqtag_request", fields: [apiRequestId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_reqtag_request")
+  tag          Tag        @relation("fk_reqtag_tag", fields: [tagId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_reqtag_tag")
+  taggedByUser User?      @relation("fk_reqtag_user", fields: [taggedByUserId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_reqtag_user")
+
+  @@id([apiRequestId, tagId], map: "pk_request_tags")
+  @@index([tagId], map: "ix_request_tags_tag")
+  @@map("request_tags")
+}
