@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    // El emitido es JavaScript puro: las importaciones `./x.ts` se reescriben
+    // a `./x.js` (`rewriteRelativeImportExtensions`), así que `dist/index.js`
+    // arranca con `node dist/index.js` sin borrado de tipos.
+    "noEmit": false
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["dist", "node_modules", "test"]
+}

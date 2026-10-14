@@ -1,0 +1,10 @@
+# Este paquete se instala de forma AISLADA (`pnpm install --ignore-workspace`)
+# para no provocar contención del lockfile de la raíz mientras hay varios
+# agentes trabajando sobre el mismo árbol (BRIEF-FASE1 §2).
+#
+# `minimumReleaseAgeExclude` lo añadió pnpm al fijar undici 8.12.1: la política
+# global de la instalación retiene publicaciones muy recientes, y esta versión
+# es la que el ADR-0002 declara verificada. Sin esta exclusión,
+# `pnpm install --frozen-lockfile` no es reproducible.
+minimumReleaseAgeExclude:
+  - undici@8.12.1
