@@ -110,9 +110,9 @@ ADR-0005 — el mismo techo que C-CODE-06 fija para la sesión de compartición.
 
 | Parámetro | Valor por defecto | Comportamiento |
 | --- | --- | --- |
-| `absolute_expires_at` | `issued_at + 30 d` | **Nunca se extiende**, tampoco al rotar. 30 d es el techo habitual de una sesión «recuérdame»; no lo tomo del `.env.example`, cuyo `CEIBA_REFRESH_TOKEN_TTL` pertenece al esquema JWT que este ADR deroga. |
-| `idle_expires_at` | `last_seen_at + 7 d` | Se **recalcula** a partir de `last_seen_at` cada vez que éste se escribe. |
-| Escritura de `last_seen_at` | como mucho **1 vez / 60 s** por sesión | Evita un `UPDATE` por petición. **Consecuencia aceptada:** la inactividad se mide con granularidad de 60 s, no al segundo. Con una ventana de 7 d es irrelevante. |
+| `absolute_expires_at` | `issued_at + 7 d` (`CEIBA_SESSION_ABSOLUTE_TTL`) | **Nunca se extiende**, tampoco al rotar. |
+| `idle_expires_at` | `last_seen_at + 12 h` (`CEIBA_SESSION_IDLE_TTL`) | Se **recalcula** a partir de `last_seen_at` cada vez que éste se escribe. |
+| Escritura de `last_seen_at` | como mucho **1 vez / 60 s** por sesión | Evita un `UPDATE` por petición. **Consecuencia aceptada:** la inactividad se mide con granularidad de 60 s, no al segundo. Con una ventana de 12 h es irrelevante. |
 
 La caducidad se evalúa **siempre con la hora del servidor**, nunca con una fecha enviada
 por el cliente. Las filas caducadas se purgan físicamente a los 30 días, como manda la nota
@@ -122,8 +122,9 @@ del esquema.
 
 Ésta es la parte que `parent_session_id` existe para soportar.
 
-**Rotación.** Cada **24 h de uso continuado**, y obligatoriamente tras cualquier cambio de
-credenciales, la sesión se rota en una sola transacción:
+**Rotación.** Cada **1 h de uso continuado** (`CEIBA_SESSION_ROTATE_AFTER`), y
+obligatoriamente tras cualquier cambio de credenciales, la sesión se rota en una sola
+transacción:
 
 1. Se inserta una fila **nueva** con `parent_session_id = <sesión actual>`, selector y
    verificador nuevos, `absolute_expires_at` **heredado sin cambios** (la rotación no
@@ -173,11 +174,11 @@ sólo nota una molestia.
 
 > **Hasta dónde llega realmente esta detección, sin venderla de más.** Detecta el **uso
 > del testigo viejo tras una rotación**, no el robo en sí. Mientras el ladrón y la
-> víctima no crucen un límite de rotación, **ambos coexisten sin alarma**: con rotación
-> cada 24 h, la latencia de detección en el peor caso es de **24 h**. Se acorta rotando
-> también ante operaciones sensibles (cambio de correo, de rol, creación de enlaces
-> compartidos), que es lo que recomiendo; reducir el periodo general es caro en escrituras.
-> Lo que **no** hace es sustituir a la expiración ni a la lista de dispositivos del §9.
+> víctima no crucen un límite de rotación, **ambos coexisten sin alarma**: la latencia de
+> detección en el peor caso es **un periodo de rotación**. Con el valor vigente de 1 h,
+> es de **1 h**. Se acorta aún más rotando también ante operaciones sensibles (cambio de
+> correo, de rol, creación de enlaces compartidos), que es lo que recomiendo. Lo que
+> **no** hace es sustituir a la expiración ni a la lista de dispositivos del §9.
 
 > **Tres precisiones de implementación, porque aquí es fácil equivocarse.**
 > **(a)** La raíz se identifica por `parent_session_id IS NULL`, **no** por el `id` más
@@ -569,12 +570,24 @@ Separo **escrito**, **ejecutado** y **verificado**.
 
 ## HUECOS que este ADR deja abiertos
 
-**HUECO: `.env.example` presupone JWT (`CEIBA_JWT_SECRET`, `CEIBA_ACCESS_TOKEN_TTL`) y hay
-que sustituirlo por la configuración de sesión con estado (`CEIBA_SESSION_ABSOLUTE_TTL`,
+**~~HUECO: `.env.example` presupone JWT~~ — CERRADO el 2026-10-14 por `darkware`** en el
+commit `b390ef8`. Se eliminaron `CEIBA_JWT_SECRET`, `CEIBA_ACCESS_TOKEN_TTL` y
+`CEIBA_REFRESH_TOKEN_TTL`, y se añadieron `CEIBA_SESSION_ABSOLUTE_TTL`,
 `CEIBA_SESSION_IDLE_TTL`, `CEIBA_SESSION_ROTATE_AFTER`, `CEIBA_CSRF_SECRET`,
-`CEIBA_COOKIE_SECURE`, `CEIBA_TRUSTED_PROXIES`) — creo que pertenece a quien posea
-`.env.example`.** Es una contradicción con C-31, no una preferencia. Yo no escribo ese
-fichero.
+`CEIBA_COOKIE_SECURE` y `CEIBA_TRUSTED_PROXIES`.
+
+> **Los valores elegidos son más estrictos que los que yo había propuesto**, y he alineado
+> este ADR con ellos en vez de al revés: **7 d** de caducidad absoluta (yo propuse 30 d),
+> **12 h** de inactividad (yo propuse 7 d) y **1 h** de rotación (yo propuse 24 h). El
+> cambio de rotación es una **mejora de seguridad real**: baja la latencia de detección de
+> un testigo robado de 24 h a 1 h. El coste es una escritura de rotación por hora y sesión
+> activa, que es asumible. **El `.env.example` manda sobre el valor por defecto de este
+> ADR**; si alguna vez divergen, es el ADR el que hay que corregir.
+>
+> Nota de protocolo: el ADR-0004 §3 fija para los ficheros de costura «sólo se añade,
+> nunca se renombra lo existente». Aquí hubo **eliminación** de tres claves, no adición.
+> Es la excepción correcta —dejar `CEIBA_JWT_SECRET` habría invitado a implementar JWT
+> contra C-31— pero conviene que conste que fue una excepción deliberada.
 
 **HUECO: no existe rol de administrador de plataforma en el esquema, y dos sitios lo
 exigen (`variable_scope.global` «Solo administradores de plataforma» y C-SSRF-11
