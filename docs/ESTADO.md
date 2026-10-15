@@ -3,7 +3,20 @@
 Inventario vivo. **Regla: nada figura como hecho sin una comprobación que lo
 respalde, y lo preparado-pero-no-ejecutado se etiqueta como tal.**
 
-Última actualización: 2026-10-15 · 18 commits · **proyecto entregado**
+Última actualización: 2026-10-15 · 21 commits · **CERRADO PARCIALMENTE**
+
+> **Cerrado parcialmente a petición del cliente.** Se entrega una rebanada
+> vertical **funcionando y usable** —autenticación, workspaces, colecciones y
+> cliente HTTP sobre PostgreSQL real—, que es entre el **25 % y el 30 %** del
+> catálogo funcional.
+>
+> **Lo que falta no es sólo Docker.** Por orden de importancia: (1) el envío de
+> solicitudes no pasa por el motor, así que los 12 controles SSRF **no protegen
+> el camino real del usuario**; (2) diez de las catorce áreas funcionales no
+> existen; (3) Compose nunca se ha ejecutado.
+>
+> Acta completa en
+> [`deliverables/ceiba-api-studio/CIERRE.md`](../../deliverables/ceiba-api-studio/CIERRE.md).
 
 > El documento de entrega, con el veredicto completo y los pasos siguientes,
 > está en [`deliverables/ceiba-api-studio/CIERRE.md`](../../deliverables/ceiba-api-studio/CIERRE.md).
