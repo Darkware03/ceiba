@@ -200,5 +200,22 @@ export async function cargarClientePrisma(urlBaseDeDatos: string): Promise<Clien
     throw new ClientePrismaNoGenerado(`El módulo ${rutaUsada} no exporta PrismaClient.`);
   }
   log.log(`cliente Prisma cargado desde ${rutaUsada}`);
-  return new Constructor({ datasources: { db: { url: urlBaseDeDatos } } });
+
+  // PRISMA 7 YA NO ACEPTA UNA CADENA DE CONEXION EN EL CONSTRUCTOR.
+  // Ni `datasources: { db: { url } }` (Prisma 5-6) ni `datasourceUrl`
+  // (transitoria): las dos revientan con
+  // `PrismaClientConstructorValidationError: Unknown property ...` y la API no
+  // llega a arrancar. Comprobadas las dos contra el cliente generado antes de
+  // escribir esto.
+  //
+  // La via valida es un ADAPTADOR DE DRIVER: Prisma deja de abrir la conexion y
+  // la delega en un cliente de PostgreSQL que le pasamos ya construido. El
+  // adaptador se importa de forma dinamica, igual que el propio cliente, para
+  // que un despliegue con `CEIBA_PERSISTENCE_DRIVER=memory` no tenga que
+  // llevarse `@prisma/adapter-pg` ni `pg` en la imagen.
+  const { PrismaPg } = (await import('@prisma/adapter-pg')) as {
+    PrismaPg: new (config: { connectionString: string }) => unknown;
+  };
+  const adaptador = new PrismaPg({ connectionString: urlBaseDeDatos });
+  return new Constructor({ adapter: adaptador });
 }

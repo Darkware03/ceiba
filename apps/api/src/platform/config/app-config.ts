@@ -130,6 +130,32 @@ export const NOMBRE_COOKIE_SESION = '__Host-ceiba_session';
 export const NOMBRE_COOKIE_CSRF = '__Host-ceiba_csrf';
 export const NOMBRE_CABECERA_CSRF = 'x-ceiba-csrf';
 
+/* EL PREFIJO `__Host-` Y `Secure` SON INSEPARABLES, Y AQUI NO LO ERAN.
+ *
+ * `__Host-` lo impone el CLIENTE, no el servidor: un navegador —y tambien
+ * `curl`— DESCARTA una cookie con ese prefijo si no viene con `Secure`. La
+ * validacion de mas abajo solo exigia `Secure` en produccion, asi que en
+ * desarrollo la API arrancaba sin quejarse, emitia la cookie y NINGUN cliente
+ * la guardaba: el registro moria con `csrf_invalido: Falta el testigo CSRF` y
+ * no habia manera de iniciar sesion.
+ *
+ * Medido: sobre HTTP el tarro de cookies quedaba vacio; el mismo recorrido
+ * sobre HTTPS devolvia 201 en registro y 200 en login.
+ *
+ * Se arregla derivando el nombre de `secure` en vez de fijarlo a ciegas. Con
+ * TLS —siempre en produccion— los nombres son los normativos del ADR-0009.
+ * Sin TLS, que solo se admite fuera de produccion, se cae el prefijo para que
+ * la cookie sea almacenable; `HttpOnly`, `SameSite=Lax` y `Path=/` no cambian.
+ */
+export function nombresDeCookie(secure: boolean): {
+  nombreSesion: string;
+  nombreCsrf: string;
+} {
+  return secure
+    ? { nombreSesion: NOMBRE_COOKIE_SESION, nombreCsrf: NOMBRE_COOKIE_CSRF }
+    : { nombreSesion: 'ceiba_session', nombreCsrf: 'ceiba_csrf' };
+}
+
 export class ErrorDeConfiguracion extends Error {
   override readonly name = 'ErrorDeConfiguracion';
 }
@@ -211,8 +237,7 @@ export function cargarConfiguracion(entorno: NodeJS.ProcessEnv): ConfiguracionAp
     origenPublico,
     proxiesDeConfianza: env.CEIBA_TRUSTED_PROXIES,
     cookies: Object.freeze({
-      nombreSesion: NOMBRE_COOKIE_SESION,
-      nombreCsrf: NOMBRE_COOKIE_CSRF,
+      ...nombresDeCookie(env.CEIBA_COOKIE_SECURE),
       secure: env.CEIBA_COOKIE_SECURE,
       sameSite: 'lax' as const,
       path: '/' as const,

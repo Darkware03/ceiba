@@ -43,3 +43,8 @@ prisma/tools/node_modules/
 # pnpm deja este lockfile vacio en la raiz al invocarse via corepack.
 # El monorepo no instala en la raiz: cada app tiene el suyo.
 /pnpm-lock.yaml
+
+# artefactos de ejecucion local (pid, logs, certificado de desarrollo)
+/.run/
+/prisma/generated/
+/prisma/node_modules/
