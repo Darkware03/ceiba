@@ -8,5 +8,9 @@
     "verify:aditivo": "node verify-additive.mjs",
     "verify:fidelidad": "node verify-fidelity.mjs"
   },
-  "dependencies": { "pg": "8.16.3" }
+  "dependencies": {
+    "@prisma/client": "^7.10.0",
+    "pg": "8.16.3",
+    "prisma": "^7.10.0"
+  }
 }
