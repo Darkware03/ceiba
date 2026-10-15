@@ -1,0 +1,15 @@
+{
+  // Build de pruebas: `src/` + `test/` a `dist-test/`, preservando la jerarquía
+  // (`dist-test/src/...` y `dist-test/test/...`). El ejecutor es el de Node
+  // (`node --test`), el mismo que usa apps/engine; no se añade ni Jest ni
+  // Vitest al backend.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "dist-test",
+    "noEmit": false,
+    "sourceMap": true
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"],
+  "exclude": ["dist", "dist-test", "node_modules"]
+}

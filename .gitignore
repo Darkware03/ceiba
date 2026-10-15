@@ -33,3 +33,6 @@ test-results/
 
 # datos de desarrollo
 docker-data/
+
+# artefactos de compilacion de pruebas
+dist-test/

@@ -1,0 +1,15 @@
+# Este paquete se instala AISLADO del resto del árbol: su propio
+# `pnpm-workspace.yaml` lo convierte en raíz de instalación, igual que
+# `apps/engine`, para no provocar contención del lockfile de la raíz del
+# repositorio mientras hay varios agentes trabajando a la vez (BRIEF-FASE1 §2).
+# Comando usado:  pnpm install --ignore-workspace
+#
+# `argon2@0.45.1` trae su script de instalación (`node-gyp-build`). NO se
+# ejecuta: el paquete ya publica binarios precompilados y `node-gyp-build` los
+# resuelve en tiempo de `require`, cosa comprobada en este contenedor
+# (`argon2.hash` + `argon2.verify` reales con el perfil m=19456,t=2,p=1 del
+# ADR-0009). Compilar desde fuente exigiría toolchain de C y aquí no hay root.
+# Se declara ignorado a propósito para que `pnpm install` termine en verde y sea
+# reproducible, en lugar de fallar con ERR_PNPM_IGNORED_BUILDS.
+allowBuilds:
+  argon2: true

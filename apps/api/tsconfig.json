@@ -1,0 +1,52 @@
+{
+  // ---------------------------------------------------------------------------
+  // apps/api — NestJS 12 sobre adaptador Fastify (ADR-0001).
+  //
+  // POR QUÉ ESTO NO SE PARECE A apps/engine. El motor se ejecuta con
+  // `node src/index.ts` (borrado de tipos de Node 24) y por eso fija
+  // `erasableSyntaxOnly`. Aquí es IMPOSIBLE: NestJS necesita decoradores,
+  // propiedades de parámetro y `emitDecoratorMetadata`, que NO son sintaxis
+  // borrable. Node 24 falla al cargar un `.ts` con decoradores. Consecuencia
+  // asumida y documentada: `apps/api` SIEMPRE se compila antes de ejecutarse
+  // (`pnpm build`, luego `node dist/main.js`), y las pruebas corren sobre
+  // `dist-test/`.
+  //
+  // MÓDULOS: @nestjs/common@12.1.3 y @nestjs/core@12.1.3 declaran
+  // `"type": "module"` y NO publican build CommonJS. Comprobado leyendo sus
+  // package.json en este contenedor. Por tanto `apps/api` es ESM: `module` y
+  // `moduleResolution` en `nodenext`, y `"type": "module"` en el package.json.
+  // Intentar CommonJS produce TS1479 («cannot be imported with require»).
+  // ---------------------------------------------------------------------------
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "rootDir": ".",
+    "outDir": "dist",
+    "types": ["node"],
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+
+    // Obligatorios para NestJS. Son justo lo contrario de `erasableSyntaxOnly`.
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+
+    // Se escriben imports con extensión `.ts` y tsc los reescribe a `.js` en el
+    // emitido, igual que en apps/engine. En ESM la extensión es obligatoria.
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "declaration": false,
+    "sourceMap": true
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"],
+  "exclude": ["dist", "dist-test", "node_modules"]
+}
