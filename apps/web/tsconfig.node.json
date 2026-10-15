@@ -1,0 +1,21 @@
+{
+  // Ficheros de configuración que ejecuta Node/Vite, no el navegador.
+  // Van aparte porque necesitan `allowJs` (importan `mark-path.js`, que es la
+  // salida JavaScript del generador de la marca) y los tipos de Node.
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "types": ["node"],
+
+    "strict": true,
+    "allowJs": true,
+    "checkJs": false,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["vite.config.ts", "vitest.config.ts", "scripts/**/*.mjs"]
+}

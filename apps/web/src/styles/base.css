@@ -1,0 +1,241 @@
+/* CEIBA API Studio — capa base de la interfaz.
+ *
+ * REGLA DE ESTE FICHERO: aquí **no se define ni un color**. Todos salen de
+ * `@ceiba/brand/tokens.css`, que ya trae las dos paletas y es un entregable
+ * cerrado y verificado (docs/BRAND.md). Si falta un token, se pide; no se
+ * inventa un hex nuevo.
+ *
+ * Los tokens y `loader.css` se cargan como <link> desde `index.html`, no desde
+ * aquí: la pantalla de arranque tiene que estar pintada y girando antes de que
+ * exista este CSS.
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--ceiba-bg);
+  color: var(--ceiba-text);
+  font-family: var(--ceiba-font-sans);
+  font-size: var(--ceiba-text-md);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  margin: 0;
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+}
+
+h1 {
+  font-size: var(--ceiba-text-2xl);
+}
+h2 {
+  font-size: var(--ceiba-text-xl);
+}
+h3 {
+  font-size: var(--ceiba-text-lg);
+}
+
+p {
+  margin: 0;
+}
+
+code,
+pre,
+kbd {
+  font-family: var(--ceiba-font-mono);
+  font-size: var(--ceiba-text-sm);
+}
+
+a {
+  color: var(--ceiba-accent);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+/* Foco visible y consistente. Es requisito de accesibilidad (§18:
+ * «Accesibilidad mediante teclado»), no decoración. */
+:focus-visible {
+  outline: none;
+  box-shadow: var(--ceiba-focus-ring);
+  border-radius: var(--ceiba-radius-sm);
+}
+
+#app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* --- Saltar al contenido: primer tabulador de la página --- */
+.ceiba-salto {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: var(--ceiba-z-overlay);
+  padding: var(--ceiba-space-3) var(--ceiba-space-4);
+  background: var(--ceiba-surface-raised);
+  color: var(--ceiba-text);
+  border: 1px solid var(--ceiba-border-strong);
+  border-radius: var(--ceiba-radius-md);
+}
+
+.ceiba-salto:focus {
+  left: var(--ceiba-space-3);
+  top: var(--ceiba-space-3);
+}
+
+/* --- Sólo para lectores de pantalla --- */
+.ceiba-oculto-visual {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* --- Superficies reutilizables --- */
+.ceiba-panel {
+  background: var(--ceiba-surface);
+  border: 1px solid var(--ceiba-border);
+  border-radius: var(--ceiba-radius-lg);
+}
+
+.ceiba-separador {
+  height: 1px;
+  background: var(--ceiba-border);
+  border: 0;
+  margin: 0;
+}
+
+/* --- Barras de desplazamiento discretas --- */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--ceiba-border-strong) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--ceiba-border-strong);
+  border-radius: var(--ceiba-radius-pill);
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+/* --- Etiqueta de método HTTP: un color por método, ya tokenizado --- */
+.ceiba-metodo {
+  font-family: var(--ceiba-font-mono);
+  font-size: var(--ceiba-text-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.ceiba-metodo--get {
+  color: var(--ceiba-method-get);
+}
+.ceiba-metodo--post {
+  color: var(--ceiba-method-post);
+}
+.ceiba-metodo--put {
+  color: var(--ceiba-method-put);
+}
+.ceiba-metodo--patch {
+  color: var(--ceiba-method-patch);
+}
+.ceiba-metodo--delete {
+  color: var(--ceiba-method-delete);
+}
+.ceiba-metodo--head,
+.ceiba-metodo--options {
+  color: var(--ceiba-method-head);
+}
+
+/* --- Capa de CodeMirror 6 ---------------------------------------------
+ * CodeMirror inyecta sus propias clases; aquí sólo se le dan los tokens de
+ * CEIBA para que no traiga su paleta. Sin esto el editor sería la única zona
+ * de la aplicación que ignora el tema.
+ */
+.cm-editor {
+  background: var(--ceiba-bg-sunken);
+  color: var(--ceiba-text);
+  font-family: var(--ceiba-font-mono);
+  font-size: var(--ceiba-text-sm);
+  height: 100%;
+}
+
+.cm-editor.cm-focused {
+  outline: none;
+  box-shadow: var(--ceiba-focus-ring);
+}
+
+.cm-editor .cm-scroller {
+  font-family: var(--ceiba-font-mono);
+  line-height: 1.6;
+}
+
+.cm-editor .cm-gutters {
+  background: var(--ceiba-bg-sunken);
+  color: var(--ceiba-text-faint);
+  border-right: 1px solid var(--ceiba-border);
+}
+
+.cm-editor .cm-activeLine,
+.cm-editor .cm-activeLineGutter {
+  background: color-mix(in srgb, var(--ceiba-accent) 8%, transparent);
+}
+
+.cm-editor .cm-selectionBackground,
+.cm-editor .cm-content ::selection {
+  background: color-mix(in srgb, var(--ceiba-accent) 24%, transparent);
+}
+
+.cm-editor .cm-cursor {
+  border-left-color: var(--ceiba-accent);
+}
+
+.cm-editor .cm-foldPlaceholder {
+  background: var(--ceiba-surface-overlay);
+  border: 1px solid var(--ceiba-border-strong);
+  color: var(--ceiba-text-muted);
+}
+
+.cm-editor .cm-searchMatch {
+  background: color-mix(in srgb, var(--ceiba-warning) 30%, transparent);
+}
+
+.cm-editor .cm-searchMatch.cm-searchMatch-selected {
+  background: color-mix(in srgb, var(--ceiba-accent) 40%, transparent);
+}
+
+.cm-editor .cm-panels {
+  background: var(--ceiba-surface-raised);
+  color: var(--ceiba-text);
+  border-color: var(--ceiba-border);
+}

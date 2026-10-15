@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="es" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <meta
+      name="description"
+      content="CEIBA API Studio — plataforma de desarrollo, prueba y automatización de APIs."
+    />
+    <title>CEIBA API Studio</title>
+
+    <!-- La marca es la del paquete cerrado `@ceiba/brand`. Se referencia por
+         ruta relativa a propósito: copiar el fichero aquí crearía un duplicado
+         que `scripts/build-brand.mjs` sobrescribiría sin avisar
+         (docs/BRAND.md §2: «No edites los derivados a mano»). -->
+    <link rel="icon" type="image/svg+xml" href="../../packages/brand/assets/favicon.svg" />
+    <link rel="apple-touch-icon" href="../../packages/brand/assets/apple-touch-icon.svg" />
+
+    <!-- ------------------------------------------------------------------
+         TEMA ANTES DE PINTAR.
+         Sincrónico y en `head`, antes del primer pintado, para que la pantalla
+         de arranque ya salga con el tema correcto y no haya destello claro.
+         Oscuro por defecto (docs/BRAND.md §3).
+
+         Aquí NO se lee ninguna credencial: sólo la preferencia de tema, que no
+         es un secreto. La sesión vive en cookie `HttpOnly` (decisión C-31) y
+         el JavaScript de la página no puede leerla ni guardarla.
+         ------------------------------------------------------------------ -->
+    <script>
+      (function () {
+        try {
+          var guardado = window.localStorage.getItem('ceiba.tema');
+          document.documentElement.setAttribute(
+            'data-theme',
+            guardado === 'light' || guardado === 'dark' ? guardado : 'dark',
+          );
+        } catch (e) {
+          document.documentElement.setAttribute('data-theme', 'dark');
+        }
+      })();
+    </script>
+
+    <!-- Tokens y giro del logo, servidos como CSS plano desde `@ceiba/brand`.
+         Van como <link> y no como `import` de JavaScript a propósito: la
+         pantalla de arranque tiene que estar pintada y girando ANTES de que
+         se descargue y ejecute el módulo de la aplicación (docs/BRAND.md §4:
+         «Está en CSS sin dependencias a propósito»). -->
+    <link rel="stylesheet" href="../../packages/brand/src/tokens.css" />
+    <link rel="stylesheet" href="../../packages/brand/src/loader.css" />
+
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        min-height: 100%;
+        background: var(--ceiba-bg, #0e100f);
+        color: var(--ceiba-text, #f3f1e7);
+      }
+
+      #ceiba-boot[hidden] {
+        display: none;
+      }
+
+      #ceiba-boot {
+        transition: opacity 180ms linear;
+      }
+
+      #ceiba-boot.ceiba-boot--saliendo {
+        opacity: 0;
+        pointer-events: none;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        #ceiba-boot {
+          transition: none;
+        }
+      }
+    </style>
+  </head>
+
+  <body>
+    <!-- ------------------------------------------------------------------
+         PANTALLA DE CARGA DE ARRANQUE — gira ANTES de montar Vue.
+
+         Requisito explícito del cliente desde el primer día: «las pantallas de
+         cargando deben llevar el logo girando» (docs/BRAND.md §4).
+
+         El marcado es exactamente el que documenta la cabecera de
+         `packages/brand/src/loader.css`, y el SVG se inyecta en el hueco
+         `<!--CEIBA_SPINNER-->` desde los trazados de
+         `packages/brand/src/mark-path.js` (ver `vite.config.ts`,
+         complemento `ceibaSpinnerDeArranque`). No se copia aquí ni un solo
+         punto del trazado: si la marca se vuelve a trazar, esto sigue
+         correcto sin tocar nada.
+         ------------------------------------------------------------------ -->
+    <div id="ceiba-boot" class="ceiba-loading ceiba-loading--boot" role="status" aria-live="polite">
+      <div class="ceiba-loading__body">
+        <!--CEIBA_SPINNER-->
+        <p class="ceiba-loading__label">Cargando CEIBA API Studio…</p>
+        <p class="ceiba-loading__detail" id="ceiba-boot-detalle">iniciando interfaz</p>
+      </div>
+    </div>
+
+    <noscript>
+      <p style="padding: 2rem; font-family: system-ui, sans-serif">
+        CEIBA API Studio necesita JavaScript para funcionar.
+      </p>
+    </noscript>
+
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

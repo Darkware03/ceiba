@@ -1,0 +1,66 @@
+{
+  // ---------------------------------------------------------------------------
+  // apps/web — Vue 3 + Vite.
+  //
+  // POR QUÉ ESTO NO SE PARECE A apps/api NI A apps/engine. Aquí el empaquetador
+  // es Vite, no `tsc`: TypeScript sólo COMPRUEBA (`--noEmit`) y la resolución
+  // de módulos es la del empaquetador (`moduleResolution: "bundler"`), que es
+  // la que admite imports sin extensión y los `exports` de los paquetes.
+  //
+  // TypeScript 6.0.3 y no 7.x: `typescript@latest` es hoy 7.0.2 y rompe la
+  // cadena (aviso del BRIEF-FASE1 confirmado con `npm view typescript version`
+  // en este contenedor). 6.0.3 es el techo real y es la misma versión que fija
+  // apps/api, de modo que el monorepo no tiene dos compiladores distintos.
+  // ---------------------------------------------------------------------------
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "preserve",
+    // `node` hace falta aunque esto sea una app de navegador: `vite.config.ts`,
+    // `scripts/check-no-token-storage.ts` y las pruebas que recorren el arbol
+    // con `node:fs` se comprueban con este mismo tsconfig.
+    "types": ["vite/client", "node"],
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "exactOptionalPropertyTypes": false,
+
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "resolveJsonModule": true,
+    "useDefineForClassFields": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "noEmit": true,
+
+    // `@ceiba/brand` se consume por ruta: `apps/web` se instala con
+    // `--ignore-workspace`, así que pnpm no enlaza el paquete del workspace.
+    // Estos `paths` tienen que coincidir con los alias de `vite.config.ts`.
+    //
+    // SIN `baseUrl` a propósito: quedó obsoleta y TypeScript 6.0.3 la rechaza
+    // con TS5101 («deprecated and will stop functioning in TypeScript 7.0»).
+    // La alternativa era silenciarla con `ignoreDeprecations`, que sólo aplaza
+    // el problema hasta la 7. Desde TypeScript 5 los `paths` se resuelven
+    // relativos a este fichero cuando no hay `baseUrl`, que es justo lo que
+    // necesitamos y además sobrevive a la 7.
+    "paths": {
+      "@/*": ["./src/*"],
+      "@ceiba/brand": ["../../packages/brand/src/index.ts"],
+      "@ceiba/brand/*": ["../../packages/brand/src/*"]
+    }
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.vue",
+    "test/**/*.ts",
+    "env.d.ts"
+  ],
+  "exclude": ["dist", "node_modules"]
+}
