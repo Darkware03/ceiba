@@ -36,3 +36,6 @@ docker-data/
 
 # artefactos de compilacion de pruebas
 dist-test/
+
+# dependencias de las herramientas de esquema
+prisma/tools/node_modules/

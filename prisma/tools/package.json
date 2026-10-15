@@ -1,0 +1,12 @@
+{
+  "name": "@ceiba/prisma-tools",
+  "private": true,
+  "type": "module",
+  "description": "Herramientas de verificacion del esquema. Dependencias propias para que los scripts se ejecuten sin depender de la raiz ni de NODE_PATH (Node ESM no resuelve especificadores desnudos fuera del arbol del propio script).",
+  "scripts": {
+    "verify:integridad": "node verify-integridad.mjs",
+    "verify:aditivo": "node verify-additive.mjs",
+    "verify:fidelidad": "node verify-fidelity.mjs"
+  },
+  "dependencies": { "pg": "8.16.3" }
+}
