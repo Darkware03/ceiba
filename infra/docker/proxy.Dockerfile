@@ -40,12 +40,15 @@ RUN mkdir -p /etc/nginx/tls /var/www/acme \
 # efímero sólo para la comprobación y se borra en la misma capa: nunca viaja
 # dentro de la imagen.
 RUN apk add --no-cache openssl \
- && openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+  && openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
       -subj "/CN=build-check.invalid" \
       -keyout /etc/nginx/tls/ceiba.key -out /etc/nginx/tls/ceiba.crt >/dev/null 2>&1 \
- && nginx -t \
- && rm -f /etc/nginx/tls/ceiba.key /etc/nginx/tls/ceiba.crt \
- && apk del openssl
+  && cp /etc/nginx/nginx.conf /tmp/nginx.conf.original \
+  && sed -i 's/server api:3000/server 127.0.0.1:3000/; s/server web:8080/server 127.0.0.1:8080/' /etc/nginx/nginx.conf \
+  && nginx -t \
+  && mv /tmp/nginx.conf.original /etc/nginx/nginx.conf \
+  && rm -f /etc/nginx/tls/ceiba.key /etc/nginx/tls/ceiba.crt \
+  && apk del openssl
 
 EXPOSE 8080 8443
 

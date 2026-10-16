@@ -1,0 +1,7 @@
+# CEIBA API Studio — archivo Compose raíz.
+# Delega en `infra/compose.yaml` para que `docker compose up -d` funcione
+# directamente desde la raíz del repositorio sin necesidad de `-f`.
+
+include:
+  - path: infra/compose.yaml
+    env_file: .env

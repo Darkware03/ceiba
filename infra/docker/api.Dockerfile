@@ -77,23 +77,27 @@ RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store,sharing=locked \
 # (P1012) y CEIBA la declara en `prisma/prisma.config.ts`, que además apunta
 # al esquema. Comprobado con prisma 7.10.0 el 2026-10-14 (ver
 # migrator.Dockerfile).
-RUN pnpm exec prisma generate --config ./prisma/prisma.config.ts
+RUN DATABASE_URL="postgresql://validacion:validacion@127.0.0.1:5432/validacion" \
+    pnpm --filter ./prisma exec prisma generate --config ./prisma.config.ts
 
 RUN pnpm --filter "@ceiba/api..." run build
 
 # `pnpm deploy` produce un árbol autocontenido, sin enlaces simbólicos hacia el
 # almacén y sin devDependencies. El `||` cubre el cambio de semántica del flag
 # entre pnpm 9 y 10+; si ninguna forma funciona, el build falla y se ve.
-RUN pnpm --filter "@ceiba/api" deploy --prod /deploy \
+RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store,sharing=locked \
+    pnpm --filter "@ceiba/api" deploy --prod /deploy \
  || pnpm --filter "@ceiba/api" deploy --prod --legacy /deploy
+RUN cd /deploy/node_modules/@prisma \
+ && ln -sf ../.pnpm/@prisma+client-runtime-utils@*/node_modules/@prisma/client-runtime-utils client-runtime-utils \
+ && test -e /deploy/node_modules/@prisma/client-runtime-utils/package.json
 
-# El arranque asumido es `dist/main.js`, que es la convención de NestJS. Como
-# `apps/api` todavía no existe, es una ASUNCIÓN (HUECO H-D1 de DESPLIEGUE.md).
-# Mejor romper aquí, con mensaje, que con el contenedor reiniciandose en bucle.
+# El punto de entrada compilado de `apps/api` es `dist/main.js`
+# (ver `apps/api/package.json` → `"main": "dist/main.js"`).
 RUN test -f /deploy/dist/main.js \
  || { echo "No existe /deploy/dist/main.js. Ajusta el CMD al punto de entrada real" >&2; \
       echo "de apps/api y avisa en DESPLIEGUE.md (HUECO H-D1)." >&2; \
-      ls -la /deploy /deploy/dist 2>/dev/null >&2 || true; exit 1; }
+      ls -la /deploy /deploy/dist >&2 2>/dev/null || true; exit 1; }
 
 # ---------------------------------------------------------------------------
 # runtime — sin pnpm, sin código fuente, sin devDependencies, sin root
@@ -125,4 +129,4 @@ HEALTHCHECK --interval=15s --timeout=5s --start-period=90s --retries=6 \
 
 # Sin shell: `node` es PID 1 y recibe SIGTERM directamente, que es lo que
 # permite un apagado ordenado. Con `init: true` en compose se reapean zombis.
-CMD ["node", "dist/main.js"]
+CMD ["node", "--enable-source-maps", "dist/main.js"]
