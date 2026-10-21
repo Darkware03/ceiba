@@ -286,6 +286,24 @@ export const esquemaActualizarPeticion = z
     bodyFields: camposComunes.bodyFields,
     binaryFileId: camposComunes.binaryFileId,
     sortKey: camposComunes.sortKey,
+    /**
+     * BLOQUEO OPTIMISTA, OPCIONAL (darkware, fase 7).
+     *
+     * La fase 7 puso **autoguardado** en el constructor: ahora se escribe
+     * solo, cada 800 ms, sin que nadie pulse nada. Eso convierte en rutina lo
+     * que antes exigía mala suerte: dos personas con la misma petición
+     * abierta, y la última pulsación gana en silencio.
+     *
+     * `api_requests.lock_version` existía desde el diseño y **no protegía
+     * nada**: el repositorio lo incrementaba sin `WHERE`. Lo detectó el
+     * `frontend-engineer` y lo dejó escrito como lo único que no podía
+     * cerrar desde su ámbito. Se cierra aquí.
+     *
+     * Es OPCIONAL a propósito: quien no lo mande sigue con el comportamiento
+     * de siempre («lo último que llega manda»). Quien lo mande —y la lectura
+     * ya lo devuelve— recibe **409** en vez de pisar a otro.
+     */
+    lockVersion: z.number().int().min(0).optional(),
   })
   .refine((v) => Object.keys(v).length > 0, { message: 'no hay nada que actualizar' })
   .refine((v) => verboCoherente(v), { message: MENSAJE_VERBO, path: ['methodCustom'] })

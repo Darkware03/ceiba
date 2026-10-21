@@ -3,6 +3,7 @@ import {
   CLIENTE_PRISMA,
   type InstanciaClientePrisma,
 } from '../../platform/persistence/prisma/prisma-client.ts';
+import { ConflictoDeEstado as ConflictoDeVersion } from '../../platform/errors/domain-errors.ts';
 import {
   MODOS_CON_ADJUNTOS,
   MODOS_CRUDOS,
@@ -385,6 +386,8 @@ export class RepositorioDePeticiones {
     cambios: Partial<DatosDePeticion> & {
       readonly bodyTypePresente: boolean;
       readonly binaryFileIdPresente?: boolean;
+      /** Si viene, la escritura falla cuando otro ya guardó antes. */
+      readonly lockVersionEsperada?: number;
     },
     ahora: Date,
   ): Promise<void> {
@@ -403,7 +406,34 @@ export class RepositorioDePeticiones {
         datosBase['bodyMode'] = cambios.bodyType;
       }
 
-      await tx.apiRequest.update({ where: { id: peticionId }, data: datosBase });
+      // ────────────────────────────────────────────────────────────────
+      // BLOQUEO OPTIMISTA (darkware, fase 7).
+      //
+      // `lock_version` se incrementaba sin `WHERE`, es decir: la columna
+      // existía, subía, y **no impedía nada**. Con el autoguardado recién
+      // puesto, dos personas con la misma petición abierta se pisan cada 800
+      // ms y en silencio.
+      //
+      // `updateMany` con la versión esperada en el `WHERE` es una sola
+      // sentencia atómica: o la fila sigue como la leí, o no se toca. Un
+      // `findFirst` + `update` tendría una carrera justo en medio.
+      //
+      // Sin `lockVersionEsperada` el comportamiento es el de siempre, para no
+      // romper a ningún cliente que aún no lo mande.
+      // ────────────────────────────────────────────────────────────────
+      if (cambios.lockVersionEsperada === undefined) {
+        await tx.apiRequest.update({ where: { id: peticionId }, data: datosBase });
+      } else {
+        const efecto = await tx.apiRequest.updateMany({
+          where: { id: peticionId, lockVersion: cambios.lockVersionEsperada, deletedAt: null },
+          data: datosBase,
+        });
+        if (efecto.count === 0) {
+          throw new ConflictoDeVersion(
+            'Alguien guardó esta petición después de que tú la abrieras. Vuelve a cargarla para no perder su trabajo ni el tuyo.',
+          );
+        }
+      }
 
       if (cambios.headers !== undefined) {
         // Las secretas se conservan: su valor no viaja al cliente y por tanto

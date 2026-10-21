@@ -252,6 +252,11 @@ export class ServicioDePeticiones implements ResolutorDeRecurso, OnModuleInit {
         ...(cambios.sortKey !== undefined ? { sortKey: cambios.sortKey } : {}),
         bodyTypePresente: cambios.bodyType !== undefined,
         binaryFileIdPresente: cambios.binaryFileId !== undefined,
+        // Bloqueo optimista: sólo si el cliente dice contra qué versión
+        // escribe. Quien no lo mande conserva el comportamiento de antes.
+        ...(cambios.lockVersion !== undefined
+          ? { lockVersionEsperada: cambios.lockVersion }
+          : {}),
       },
       this.reloj.ahora(),
     );
