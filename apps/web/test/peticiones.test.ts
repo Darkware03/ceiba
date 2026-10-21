@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createPinia, setActivePinia, type Pinia } from 'pinia';
 import { RouterLinkStub, flushPromises, mount } from '@vue/test-utils';
+import type { DOMWrapper, VueWrapper } from '@vue/test-utils';
 import { usarFetch, type FuncionFetch } from '@/api/cliente';
 import { usarPortapapeles } from '@/composables/usarPortapapeles';
 import {
@@ -46,6 +47,26 @@ import type { Peticion } from '@/api/peticiones';
  */
 
 const TESTIGO_CSRF = 'nonce.firma';
+
+/**
+ * Busca un campo por su **etiqueta accesible**, no por su posición.
+ *
+ * `CeibaCampo` enlaza `<label for>` con el `id` del control, así que esto
+ * recorre las etiquetas, encuentra la que coincide y devuelve su control. Un
+ * selector por índice se rompe en cuanto alguien añade un diálogo a la misma
+ * vista — pasó de verdad en la fase 7.
+ */
+function campoPorEtiqueta(vista: VueWrapper, etiqueta: string): DOMWrapper<HTMLInputElement> {
+  const marca = vista.findAll('label').find((l) => l.text().trim().startsWith(etiqueta));
+  if (marca === undefined) throw new Error(`No hay ningún campo etiquetado «${etiqueta}».`);
+  const destino = marca.attributes('for');
+  if (destino === undefined) {
+    throw new Error(`La etiqueta «${etiqueta}» no apunta a ningún control (falta «for»).`);
+  }
+  const control = vista.find<HTMLInputElement>(`#${destino}`);
+  if (!control.exists()) throw new Error(`La etiqueta «${etiqueta}» apunta a un control que no existe.`);
+  return control;
+}
 
 interface LlamadaRegistrada {
   readonly url: string;
@@ -686,10 +707,20 @@ describe('VistaDeColeccion — la colección deja de estar muerta', () => {
     await abrir?.trigger('click');
     await vista.vm.$nextTick();
 
-    const campos = vista.findAll('input');
-    await campos[0]?.setValue('Alta de cliente');
-    const url = campos.find((c) => (c.element as HTMLInputElement).value === '');
-    await url?.setValue('{{base_url}}/v1/clientes');
+    /*
+     * POR ETIQUETA, NO POR ÍNDICE. Esto estaba escrito como
+     * `vista.findAll('input')[0]` y dejó de funcionar en cuanto el ámbito D
+     * añadió `DialogoDeComparticion` a la cabecera de esta misma vista
+     * (renderizado siempre, con `:abierto`, no con `v-if`): sus campos pasaron
+     * a ser los primeros `<input>` del documento y el nombre de la petición se
+     * quedaba vacío, así que la validación cancelaba el envío y el POST nunca
+     * salía. El fallo era de la prueba, no de la vista: un selector por
+     * posición afirma algo sobre el orden del DOM que nadie prometió.
+     * Buscar por la etiqueta accesible es estable y además comprueba, de
+     * paso, que el campo TIENE nombre accesible.
+     */
+    await campoPorEtiqueta(vista, 'Nombre de la petición').setValue('Alta de cliente');
+    await campoPorEtiqueta(vista, 'URL').setValue('{{base_url}}/v1/clientes');
 
     const guardar = vista.findAll('button').find((b) => b.text().includes('Crear petición'));
     await guardar?.trigger('click');
@@ -771,21 +802,57 @@ describe('abrir una petición guardada en el constructor', () => {
   });
 
   /**
-   * `multipart_form_data` está en el enum de la base pero esta interfaz no
-   * sabe componerlo. Abrirlo como texto plano enviaría algo distinto de lo
-   * guardado, así que se declara en lugar de fingir la equivalencia.
+   * ACTUALIZADO EN LA FASE 7, Y EL CAMBIO ES EL ENTREGABLE.
+   *
+   * Hasta aquí esta prueba afirmaba que `multipart_form_data` se declaraba
+   * como «no representable», porque la interfaz no sabía componerlo. P5 lo
+   * implementa: el cliente pidió «formdata, binario». Así que la expectativa
+   * correcta ahora es la contraria —se abre con su modo propio— y la garantía
+   * de fondo («lo que no se sabe componer se declara, no se falsea») se sigue
+   * comprobando con el modo que SÍ queda fuera: `custom`, que el esquema deja
+   * sin forma definida.
    */
-  it('declara el cuerpo que no sabe componer en vez de falsearlo', () => {
+  it('abre los modos de formulario y binario con su modo propio (P5)', () => {
     const almacen = usarAlmacenDeConstructor();
-    const limitaciones = almacen.cargarDesdePeticionGuardada({
+
+    const sinLimitaciones = almacen.cargarDesdePeticionGuardada({
       method: 'POST',
       url: 'https://api.ejemplo.com/v1/subida',
       bodyType: 'multipart_form_data',
+      bodyFields: [
+        { key: 'titulo', kind: 'text', value: 'hola', enabled: true },
+        { key: 'adjunto', kind: 'file', fileId: 'f-1', enabled: true },
+      ],
+    });
+
+    expect(sinLimitaciones).toHaveLength(0);
+    expect(almacen.cuerpo.modo).toBe('multipart_form_data');
+    expect(almacen.camposDelCuerpo).toHaveLength(2);
+    expect(almacen.camposDelCuerpo[0]).toMatchObject({ nombre: 'titulo', tipo: 'texto', valor: 'hola' });
+    expect(almacen.camposDelCuerpo[1]).toMatchObject({ nombre: 'adjunto', tipo: 'fichero' });
+    expect(almacen.camposDelCuerpo[1]?.fichero?.id).toBe('f-1');
+
+    almacen.cargarDesdePeticionGuardada({
+      method: 'PUT',
+      url: 'https://api.ejemplo.com/v1/fichero',
+      bodyType: 'binary_file',
+      binaryFile: { id: 'f-9', fileName: 'informe.pdf', contentType: 'application/pdf', sizeBytes: 1024 },
+    });
+    expect(almacen.cuerpo.modo).toBe('binary_file');
+    expect(almacen.cuerpo.ficheroBinario?.fileName).toBe('informe.pdf');
+  });
+
+  it('declara el cuerpo que SIGUE sin saber componer en vez de falsearlo', () => {
+    const almacen = usarAlmacenDeConstructor();
+    const limitaciones = almacen.cargarDesdePeticionGuardada({
+      method: 'POST',
+      url: 'https://api.ejemplo.com/v1/raro',
+      bodyType: 'custom',
       body: 'algo',
     });
 
     expect(limitaciones).toHaveLength(1);
-    expect(limitaciones[0]).toContain('multipart_form_data');
+    expect(limitaciones[0]).toContain('custom');
     expect(almacen.cuerpo.modo).toBe('none');
     expect(almacen.cuerpo.contenido).toBe('');
   });

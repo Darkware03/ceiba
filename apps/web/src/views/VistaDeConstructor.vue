@@ -17,13 +17,19 @@ import CeibaBoton from '@/components/ui/CeibaBoton.vue';
 import BarraDeSolicitud from '@/components/solicitud/BarraDeSolicitud.vue';
 import EditorDeCuerpo from '@/components/solicitud/EditorDeCuerpo.vue';
 import EditorDePares from '@/components/solicitud/EditorDePares.vue';
+import IndicadorDeGuardado from '@/components/solicitud/IndicadorDeGuardado.vue';
+import TituloEditable from '@/components/peticiones/TituloEditable.vue';
+import DialogoDeCurl from '@/components/peticiones/DialogoDeCurl.vue';
 import PanelDeRespuesta from '@/components/respuesta/PanelDeRespuesta.vue';
 import { usarAlmacenDeConstructor } from '@/stores/constructor';
+import { usarAlmacenDePeticiones } from '@/stores/peticiones';
+import { usarAutoguardado } from '@/composables/usarAutoguardado';
 import { ADAPTADORES, formatearDuracion } from '@/api/ejecucion';
-import { clavesSecretas, obtenerPeticion } from '@/api/peticiones';
+import { clavesSecretas, errorDeNombreDePeticion, obtenerPeticion } from '@/api/peticiones';
+import { obtenerColeccion } from '@/api/colecciones';
 import { mensajeDeError } from '@/api/errores';
 import { RUTA_COLECCION } from '@/router/nombres';
-import type { IdDeAdaptador, Par } from '@/api/ejecucion';
+import type { CampoDeCuerpo, FicheroDeCuerpo, IdDeAdaptador, Par } from '@/api/ejecucion';
 import type { Peticion } from '@/api/peticiones';
 
 /**
@@ -37,6 +43,7 @@ import type { Peticion } from '@/api/peticiones';
 const props = defineProps<{ peticionId?: string; coleccionId?: string }>();
 
 const constructor = usarAlmacenDeConstructor();
+const almacenDePeticiones = usarAlmacenDePeticiones();
 
 const peticionAbierta = ref<Peticion | null>(null);
 const cargandoPeticion = ref(false);
@@ -93,12 +100,39 @@ async function abrirPeticionGuardada(requestId: string): Promise<void> {
       queryParams: peticion.queryParams.map((par) => ({ ...par })),
       bodyType: peticion.bodyType,
       body: peticion.body,
+      bodyFields: peticion.bodyFields,
+      binaryFile: peticion.binaryFile,
+      lockVersion: peticion.lockVersion,
     }));
+    void resolverWorkspace(peticion.collectionId);
   } catch (error) {
     peticionAbierta.value = null;
     errorDePeticion.value = mensajeDeError(error);
   } finally {
     cargandoPeticion.value = false;
+  }
+}
+
+/**
+ * Averigua a qué workspace pertenece la colección abierta.
+ *
+ * HACE FALTA PARA P5 Y NO VIENE EN LA PETICIÓN. La subida de ficheros cuelga
+ * de `/workspaces/:workspaceId/files` (§2.2), pero `GET /requests/:id` **no**
+ * devuelve `workspaceId`: lo comprobé en `vistaResumen`/`vistaDetalle` de
+ * `request.service.ts`, que no lo incluyen en su lista de permitidos. Así que
+ * se resuelve con una lectura extra de la colección, que sí lo lleva.
+ *
+ * Si falla, **no es un error de la vista**: el constructor funciona entero sin
+ * esto; lo único que no se puede hacer es subir ficheros, y el selector lo
+ * dice con todas sus letras. Por eso este fallo no pinta un cartel rojo.
+ */
+async function resolverWorkspace(collectionId: string): Promise<void> {
+  if (collectionId.length === 0) return;
+  try {
+    const { coleccion } = await obtenerColeccion(collectionId);
+    constructor.workspaceId = coleccion.workspaceId;
+  } catch {
+    constructor.workspaceId = null;
   }
 }
 
@@ -109,10 +143,118 @@ onMounted(() => {
 watch(
   () => props.peticionId,
   (nuevo, anterior) => {
-    if (nuevo === anterior || nuevo === undefined) return;
+    if (nuevo === anterior) return;
+    if (nuevo === undefined) {
+      // Se ha pasado de una petición guardada al borrador en blanco. Hay que
+      // dejar de apuntar a la fila anterior o el siguiente rebote escribiría
+      // en ella.
+      peticionAbierta.value = null;
+      constructor.olvidarPeticionAbierta();
+      return;
+    }
     void abrirPeticionGuardada(nuevo);
   },
 );
+
+// ---------------------------------------------------------------------------
+// P1 · Autoguardado
+// ---------------------------------------------------------------------------
+
+/**
+ * El rebote sólo está vivo cuando hay una fila que actualizar **y hay algo
+ * distinto que escribir**.
+ *
+ * Las dos condiciones son necesarias y cada una arregla un fallo concreto:
+ *
+ *  - `hayPeticionAbierta`: «no autoguardar una petición que todavía no existe
+ *    — eso es crear, y lo decide el usuario» (§3.C.1).
+ *  - `hayCambiosSinGuardar`: sin esto, **abrir** una petición contaría como
+ *    editarla. La huella del borrador pasa de «vacío» a «la petición» al
+ *    cargar, el observador lo veía como un cambio y el indicador anunciaba
+ *    «Sin guardar» nada más abrir, además de lanzar un `PATCH` que no
+ *    cambiaba nada. Lo detectó la prueba del indicador; queda aquí anotado
+ *    para que nadie «simplifique» esta condición.
+ */
+const autoguardado = usarAutoguardado({
+  huella: () => constructor.huellaDelBorrador,
+  activo: () => constructor.hayPeticionAbierta && constructor.hayCambiosSinGuardar,
+  guardar: async () => {
+    await constructor.guardarAhora();
+  },
+});
+
+watch(
+  () => autoguardado.pendiente.value,
+  (hay) => {
+    if (hay) constructor.marcarSinGuardar();
+  },
+);
+
+/** `blur` de cualquier campo: guardado inmediato, como pide el brief. */
+function alPerderFoco(): void {
+  autoguardado.alPerderFoco();
+}
+
+async function reintentarGuardado(): Promise<void> {
+  await constructor.guardarAhora();
+}
+
+// ---------------------------------------------------------------------------
+// P2 · Renombrar dentro de la petición
+// ---------------------------------------------------------------------------
+
+function renombrar(nombre: string): void {
+  const fallo = constructor.renombrar(nombre);
+  if (fallo !== null) return;
+  // El nombre también vive en la cabecera de la vista y en el almacén de la
+  // lista; si no se refresca aquí, al volver a la colección se vería el viejo.
+  const abierta = peticionAbierta.value;
+  if (abierta !== null) peticionAbierta.value = { ...abierta, name: constructor.nombre };
+  void autoguardado.guardarYa();
+}
+
+// ---------------------------------------------------------------------------
+// §1.1 causa 2 · «Copiar como cURL» dentro del constructor
+// ---------------------------------------------------------------------------
+
+const copiandoCurl = ref(false);
+
+/**
+ * GUARDA PRIMERO Y PIDE DESPUÉS. No es una floritura: es la causa 1 del §1.1.
+ *
+ * `GET /requests/:id/curl` genera el comando desde la **fila guardada**
+ * (`request.service.ts#comoCurl` lee la fila y se la pasa a `generarCurl`).
+ * Si se pidiese sin guardar, el usuario recibiría el cURL de lo que había
+ * antes —sin su cuerpo y sin sus cabeceras—, que es literalmente la queja del
+ * cliente. Con P1 el borrador ya suele estar guardado; esto cierra la ventana
+ * que queda entre la última tecla y el rebote.
+ */
+const recopiando = ref(false);
+
+async function recopiarCurl(): Promise<void> {
+  recopiando.value = true;
+  try {
+    await almacenDePeticiones.recopiarCurl();
+  } finally {
+    recopiando.value = false;
+  }
+}
+
+async function copiarComoCurl(): Promise<void> {
+  const abierta = peticionAbierta.value;
+  if (abierta === null || copiandoCurl.value) return;
+  copiandoCurl.value = true;
+  try {
+    await autoguardado.guardarYa();
+    if (constructor.estadoDeGuardado === 'error') {
+      // Exportaría la versión vieja y parecería la nueva. Mejor no exportar.
+      return;
+    }
+    await almacenDePeticiones.copiarComoCurl(abierta.id, constructor.nombre || abierta.name);
+  } finally {
+    copiandoCurl.value = false;
+  }
+}
 
 type PestanaDeSolicitud = 'parametros' | 'cabeceras' | 'cuerpo';
 const pestana = ref<PestanaDeSolicitud>('parametros');
@@ -135,6 +277,19 @@ function cambiarAdaptador(evento: Event): void {
   constructor.usarAdaptador((evento.target as HTMLSelectElement).value as IdDeAdaptador);
 }
 
+// --- P5 · Cuerpo: formulario y binario -------------------------------------
+
+function actualizarCampoDeCuerpo(
+  id: string,
+  cambio: Partial<Pick<CampoDeCuerpo, 'nombre' | 'valor' | 'tipo' | 'activo'>>,
+): void {
+  constructor.actualizarCampoDeCuerpo(id, cambio);
+}
+
+function ficheroDeCampo(id: string, fichero: FicheroDeCuerpo | null): void {
+  constructor.establecerFicheroDeCampo(id, fichero);
+}
+
 async function enviar(): Promise<void> {
   await constructor.ejecutarSolicitud();
 }
@@ -147,9 +302,43 @@ async function enviar(): Promise<void> {
     </nav>
 
     <header class="constructor__cabecera">
-      <h1>
-        {{ peticionAbierta ? peticionAbierta.name : 'Constructor de solicitudes' }}
-      </h1>
+      <!--
+        P2. Antes esto era un `<h1>` de sólo lectura y renombrar obligaba a
+        volver a la lista de la colección. Ahora el título se edita aquí
+        mismo; sigue siendo un `<h1>` cuando no se está editando, para no
+        dejar la página sin encabezado de nivel 1.
+      -->
+      <TituloEditable
+        :nombre="constructor.nombre"
+        :editable="constructor.hayPeticionAbierta"
+        :validar="errorDeNombreDePeticion"
+        @renombrar="renombrar"
+      />
+
+      <div class="constructor__acciones">
+        <!-- P1: el indicador no es decoración; ver `IndicadorDeGuardado.vue`. -->
+        <IndicadorDeGuardado
+          v-if="constructor.hayPeticionAbierta"
+          :estado="constructor.estadoDeGuardado"
+          :error="constructor.errorDeGuardado"
+          :guardado-en="constructor.guardadoEn"
+          @reintentar="reintentarGuardado"
+        />
+
+        <!-- §1.1 causa 2: el botón, por fin, donde el usuario está. -->
+        <CeibaBoton
+          v-if="peticionAbierta"
+          compacto
+          variante="secundario"
+          data-prueba="curl-en-constructor"
+          :cargando="copiandoCurl"
+          :aria-label="`Copiar como cURL la petición ${constructor.nombre}`"
+          @click="copiarComoCurl"
+        >
+          Copiar como cURL
+        </CeibaBoton>
+      </div>
+
       <label class="constructor__modo">
         <span class="constructor__modo-etiqueta">Modo de ejecución</span>
         <select
@@ -217,14 +406,24 @@ async function enviar(): Promise<void> {
       </p>
     </CeibaAviso>
 
+    <CeibaAviso
+      v-if="constructor.estadoDeGuardado === 'conflicto'"
+      tono="error"
+      titulo="Esta petición cambió mientras la editábas"
+    >
+      {{ constructor.errorDeGuardado }}
+    </CeibaAviso>
+
     <BarraDeSolicitud
       :metodo="constructor.metodo"
       :url="constructor.url"
       :url-efectiva="constructor.urlEfectiva"
       :ejecutando="constructor.ejecutando"
       :puede-enviar="constructor.puedeEnviar"
+      :coleccion-id="constructor.coleccionId"
       @update:metodo="constructor.metodo = $event"
       @update:url="constructor.url = $event"
+      @desenfoque="alPerderFoco"
       @enviar="enviar"
     />
 
@@ -268,10 +467,12 @@ async function enviar(): Promise<void> {
           :pares="constructor.parametros"
           sustantivo="parámetro"
           etiqueta-nombre="Clave"
+          :coleccion-id="constructor.coleccionId"
           @actualizar="(id, campo, valor) => actualizarPar(constructor.parametros, id, campo, valor)"
           @alternar="(id, activo) => alternarPar(constructor.parametros, id, activo)"
           @quitar="constructor.quitarParametro($event)"
           @anadir="constructor.anadirParametro()"
+          @desenfoque="alPerderFoco"
         />
 
         <EditorDePares
@@ -280,10 +481,12 @@ async function enviar(): Promise<void> {
           sustantivo="cabecera"
           :nombres-con-aviso="constructor.cabecerasIgnoradas"
           titulo-del-aviso="El navegador no permite enviar esta cabecera."
+          :coleccion-id="constructor.coleccionId"
           @actualizar="(id, campo, valor) => actualizarPar(constructor.cabeceras, id, campo, valor)"
           @alternar="(id, activo) => alternarPar(constructor.cabeceras, id, activo)"
           @quitar="constructor.quitarCabecera($event)"
           @anadir="constructor.anadirCabecera()"
+          @desenfoque="alPerderFoco"
         />
 
         <EditorDeCuerpo
@@ -292,8 +495,18 @@ async function enviar(): Promise<void> {
           :contenido="constructor.cuerpo.contenido"
           :tipo-contenido="constructor.tipoDeContenidoEfectivo"
           :metodo="constructor.metodo"
+          :campos="constructor.camposDelCuerpo"
+          :fichero-binario="constructor.cuerpo.ficheroBinario ?? null"
+          :workspace-id="constructor.workspaceId"
+          :limitaciones="constructor.limitacionesDelCuerpo"
+          :coleccion-id="constructor.coleccionId"
           @update:modo="constructor.establecerModoDeCuerpo($event)"
           @update:contenido="constructor.establecerContenidoDelCuerpo($event)"
+          @actualizar-campo="actualizarCampoDeCuerpo"
+          @fichero-de-campo="ficheroDeCampo"
+          @quitar-campo="constructor.quitarCampoDeCuerpo($event)"
+          @anadir-campo="constructor.anadirCampoDeCuerpo()"
+          @update:fichero-binario="constructor.establecerFicheroBinario($event)"
         />
       </section>
 
@@ -343,6 +556,28 @@ async function enviar(): Promise<void> {
         </li>
       </ul>
     </section>
+
+    <!--
+      Mismo diálogo que en la lista de la colección, a propósito: el comando
+      lo genera el servidor y lo único que hace falta aquí es enseñarlo con
+      sus advertencias. Duplicar el componente sería duplicar la regla de
+      «el texto no se toca» en dos sitios donde puede divergir.
+    -->
+    <DialogoDeCurl
+      v-if="almacenDePeticiones.curl"
+      :estado="almacenDePeticiones.curl"
+      :recopiando="recopiando"
+      @cerrar="almacenDePeticiones.cerrarCurl()"
+      @recopiar="recopiarCurl"
+    />
+
+    <CeibaAviso
+      v-if="almacenDePeticiones.errorDeCurl"
+      tono="error"
+      titulo="No se pudo generar el cURL"
+    >
+      {{ almacenDePeticiones.errorDeCurl }}
+    </CeibaAviso>
   </div>
 </template>
 
@@ -363,6 +598,14 @@ async function enviar(): Promise<void> {
   align-items: center;
   justify-content: space-between;
   gap: var(--ceiba-space-3);
+}
+
+.constructor__acciones {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ceiba-space-3);
+  min-width: 0;
 }
 
 .constructor__migas {

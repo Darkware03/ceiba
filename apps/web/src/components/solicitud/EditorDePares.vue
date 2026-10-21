@@ -12,11 +12,19 @@
  * su etiqueta ENCIMA del control, que es lo correcto en un formulario pero
  * rompe una rejilla de dos columnas con decenas de filas. La accesibilidad se
  * mantiene con `aria-label` por celda, que es lo que `CeibaCampo` aporta.
+ *
+ * FASE 7, P6: la celda del **valor** pasa a ser un `CampoConVariables`. El
+ * cliente lo pidió nominalmente —«también para el value de las cabeceras»— y
+ * es donde vive `Authorization: Bearer {{token}}`. La celda del **nombre** se
+ * queda como estaba: una cabecera no se llama con una variable, y poner un
+ * desplegable ahí sólo estorbaría.
  */
 import CeibaBoton from '@/components/ui/CeibaBoton.vue';
+import CampoConVariables from '@/components/variables/CampoConVariables.vue';
+import { usarVariablesDeColeccion } from '@/composables/usarVariablesDeColeccion';
 import type { Par } from '@/api/ejecucion';
 
-withDefaults(
+const props = withDefaults(
   defineProps<{
     pares: readonly Par[];
     /** Nombre en singular de lo que se edita: «cabecera», «parámetro». */
@@ -26,12 +34,15 @@ withDefaults(
     /** Nombres que hay que marcar como problemáticos (p. ej. prohibidos). */
     nombresConAviso?: readonly string[];
     tituloDelAviso?: string;
+    /** Colección de la que salen las variables. `null` ⇒ sin sugerencias. */
+    coleccionId?: string | null;
   }>(),
   {
     etiquetaNombre: 'Nombre',
     etiquetaValor: 'Valor',
     nombresConAviso: () => [],
     tituloDelAviso: '',
+    coleccionId: null,
   },
 );
 
@@ -40,7 +51,15 @@ const emitir = defineEmits<{
   alternar: [id: string, activo: boolean];
   quitar: [id: string];
   anadir: [];
+  /** `blur` de cualquier celda: lo usa el autoguardado inmediato (P1). */
+  desenfoque: [];
 }>();
+
+/**
+ * Una sola carga para toda la tabla, no una por fila. Con veinte cabeceras,
+ * un composable por fila serían veinte peticiones idénticas.
+ */
+const { variables, cargando } = usarVariablesDeColeccion(() => props.coleccionId ?? undefined);
 
 function texto(evento: Event): string {
   return (evento.target as HTMLInputElement).value;
@@ -83,15 +102,16 @@ function marcado(evento: Event): boolean {
           @input="emitir('actualizar', par.id, 'nombre', texto($event))"
         />
 
-        <input
-          class="pares__entrada"
-          type="text"
-          :value="par.valor"
-          :placeholder="etiquetaValor"
-          :aria-label="`${etiquetaValor} de ${sustantivo} ${par.nombre || 'sin nombre'}`"
-          spellcheck="false"
-          autocomplete="off"
-          @input="emitir('actualizar', par.id, 'valor', texto($event))"
+        <CampoConVariables
+          class="pares__valor"
+          clase-del-control="pares__entrada"
+          :model-value="par.valor"
+          :variables="variables"
+          :cargando-variables="cargando"
+          :marcador-de-posicion="etiquetaValor"
+          :etiqueta="`${etiquetaValor} de ${sustantivo} ${par.nombre || 'sin nombre'}`"
+          @update:model-value="emitir('actualizar', par.id, 'valor', $event)"
+          @desenfoque="emitir('desenfoque')"
         />
 
         <button
@@ -171,6 +191,17 @@ function marcado(evento: Event): boolean {
   border-color: var(--ceiba-warning);
 }
 
+/* El campo con sugerencias trae su propio envoltorio posicionado; la celda
+ * sólo tiene que dejarle el ancho y no romper la rejilla. */
+.pares__valor {
+  min-width: 0;
+  width: 100%;
+}
+
+.pares__valor :deep(.pares__entrada) {
+  width: 100%;
+}
+
 .pares__casilla {
   accent-color: var(--ceiba-accent);
   justify-self: center;
@@ -215,7 +246,7 @@ function marcado(evento: Event): boolean {
   .pares__entrada--nombre {
     grid-area: nombre;
   }
-  .pares__entrada:not(.pares__entrada--nombre) {
+  .pares__valor {
     grid-area: valor;
   }
   .pares__quitar {

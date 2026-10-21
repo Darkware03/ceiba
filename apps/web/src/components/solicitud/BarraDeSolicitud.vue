@@ -10,10 +10,18 @@
  * Debajo se enseña la URL **efectiva** (con los parámetros ya compuestos)
  * cuando difiere de lo tecleado: es la única forma de que el usuario vea qué
  * se va a pedir de verdad antes de pulsar.
+ *
+ * FASE 7, P6: la URL deja de ser un `CeibaCampo` y pasa a ser un
+ * `CampoConVariables`. El cliente pidió «si pongo las dobles llaves debería
+ * mostrarme las variables de entorno», y la URL es el sitio donde más se
+ * escriben (`{{base_url}}/v1/…`). Se pierde la etiqueta visible de
+ * `CeibaCampo`, así que se repone a mano encima del control para no dejar el
+ * campo sin nombre accesible.
  */
 import CeibaBoton from '@/components/ui/CeibaBoton.vue';
-import CeibaCampo from '@/components/ui/CeibaCampo.vue';
+import CampoConVariables from '@/components/variables/CampoConVariables.vue';
 import SelectorDeMetodo from './SelectorDeMetodo.vue';
+import { usarVariablesDeColeccion } from '@/composables/usarVariablesDeColeccion';
 import type { MetodoDeSolicitud } from '@/api/ejecucion';
 
 const props = withDefaults(
@@ -23,15 +31,21 @@ const props = withDefaults(
     urlEfectiva: string;
     ejecutando?: boolean;
     puedeEnviar?: boolean;
+    /** Colección de la que salen las variables. `null` ⇒ sin sugerencias. */
+    coleccionId?: string | null;
   }>(),
-  { ejecutando: false, puedeEnviar: false },
+  { ejecutando: false, puedeEnviar: false, coleccionId: null },
 );
 
 const emitir = defineEmits<{
   'update:metodo': [valor: MetodoDeSolicitud];
   'update:url': [valor: string];
+  /** `blur` del campo de URL: lo usa el autoguardado inmediato (P1). */
+  desenfoque: [];
   enviar: [];
 }>();
+
+const { variables, cargando } = usarVariablesDeColeccion(() => props.coleccionId ?? undefined);
 
 function alEnviar(): void {
   if (!props.puedeEnviar) return;
@@ -48,15 +62,20 @@ function alEnviar(): void {
         @update:model-value="emitir('update:metodo', $event)"
       />
 
-      <CeibaCampo
-        class="barra__url"
-        etiqueta="URL de destino"
-        marcador-de-posicion="https://api.ejemplo.com/v1/recursos"
-        monoespaciada
-        :model-value="url"
-        :deshabilitado="ejecutando"
-        @update:model-value="emitir('update:url', $event)"
-      />
+      <div class="barra__url">
+        <span id="barra-url-etiqueta" class="barra__etiqueta">URL de destino</span>
+        <CampoConVariables
+          :model-value="url"
+          :variables="variables"
+          :cargando-variables="cargando"
+          etiqueta="URL de destino"
+          marcador-de-posicion="https://api.ejemplo.com/v1/recursos"
+          :deshabilitado="ejecutando"
+          @update:model-value="emitir('update:url', $event)"
+          @desenfoque="emitir('desenfoque')"
+          @enviar="alEnviar"
+        />
+      </div>
 
       <CeibaBoton
         variante="primario"
@@ -92,6 +111,17 @@ function alEnviar(): void {
 .barra__url {
   flex: 1 1 auto;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ceiba-space-1);
+}
+
+/* Reposición de la etiqueta que ponía `CeibaCampo`: mismo aspecto, para que
+ * la barra no cambie de altura ni de aire al pasar al campo con sugerencias. */
+.barra__etiqueta {
+  font-size: var(--ceiba-text-sm);
+  font-weight: 500;
+  color: var(--ceiba-text-muted);
 }
 
 /* El selector y el botón se alinean con el campo, que lleva etiqueta encima. */

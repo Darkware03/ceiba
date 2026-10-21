@@ -1,4 +1,6 @@
-import { peticionApi } from './cliente';
+import { BASE_API, peticionApi } from './cliente';
+import { NOMBRE_CABECERA_CSRF, testigoCsrfActual } from './csrf';
+import { ErrorDeApi, ErrorDeRed } from './errores';
 
 /**
  * Familia «Peticiones» (`api_requests`), transcrita del contrato **vinculante**
@@ -57,14 +59,22 @@ export const METODOS_DE_PETICION = [
 export type MetodoDePeticion = (typeof METODOS_DE_PETICION)[number];
 
 /**
- * `body_mode` **tal y como lo enumera el `BRIEF-FASE6` §1**: ocho valores.
+ * `body_mode` **contado por mí en `prisma/schema/01-enums.prisma`** el
+ * 2026-10-21: son **diez**, no ocho.
  *
- * DISCREPANCIA DECLARADA: el enum aplicado en PostgreSQL
- * (`migration.sql:35`) tiene **diez** — añade `binary_file` y `custom`. Esos
- * dos no se ofrecen para elegir porque esta interfaz no sabe componer su
- * cuerpo, y ofrecer un modo que no se sabe serializar es un control que miente.
- * Al **leer** sí se toleran (ver `normalizarModoDeCuerpo`), para no reventar
- * ante una fila que ya exista.
+ * HISTORIA DE ESTA CONSTANTE, porque importa. En la fase 6 este fichero
+ * declaraba ocho «tal y como lo enumera el `BRIEF-FASE6` §1» y marcaba
+ * `binary_file` y `custom` como sólo-lectura «porque esta interfaz no sabe
+ * componer su cuerpo». En la fase 7 ya sabe componer `binary_file` (P5), así
+ * que se mueve a los guardables. `custom` se queda fuera **a conciencia**: no
+ * tiene forma definida en el esquema y ofrecer un modo sin forma es un control
+ * que miente.
+ *
+ * HUECO DEL SERVIDOR, MEDIDO: el DTO de la API
+ * (`apps/api/src/modules/request/dto/request.dto.ts`) aún enumera ocho y
+ * rechaza `binary_file` con 422. El §2.1 del `BRIEF-FASE7` dice que debe
+ * aceptar «los 10 del enum»; mientras el ámbito A no lo cambie, guardar un
+ * cuerpo binario fallará con 422 y la interfaz lo dirá tal cual.
  */
 export const MODOS_DE_CUERPO_GUARDADO = [
   'none',
@@ -75,12 +85,19 @@ export const MODOS_DE_CUERPO_GUARDADO = [
   'graphql',
   'form_urlencoded',
   'multipart_form_data',
+  'binary_file',
 ] as const;
 
 export type ModoDeCuerpoGuardado = (typeof MODOS_DE_CUERPO_GUARDADO)[number];
 
-/** Los dos del enum de la base que esta interfaz lee pero no ofrece. */
-export const MODOS_DE_CUERPO_SOLO_LECTURA = ['binary_file', 'custom'] as const;
+/** El del enum de la base que esta interfaz lee pero no ofrece. */
+export const MODOS_DE_CUERPO_SOLO_LECTURA = ['custom'] as const;
+
+/** Los diez de `body_mode`. Contados en `01-enums.prisma`, no copiados. */
+export const MODOS_DE_CUERPO_DEL_ESQUEMA = [
+  ...MODOS_DE_CUERPO_GUARDADO,
+  ...MODOS_DE_CUERPO_SOLO_LECTURA,
+] as const;
 
 /** Etiqueta legible de cada modo de cuerpo. */
 export const ETIQUETA_DE_MODO: Readonly<Record<string, string>> = Object.freeze({
@@ -121,6 +138,36 @@ export interface ParGuardado {
   readonly secret?: boolean;
 }
 
+/**
+ * Campo de un cuerpo de formulario, §2.1 del `BRIEF-FASE7`.
+ *
+ * `kind: 'file'` exige `fileId`; `kind: 'text'` exige `value`. **Nunca los
+ * dos**: lo impone `ck_bodyfield_xor` en la base y se respeta también aquí
+ * para que un 500 del CHECK sea imposible desde esta interfaz.
+ */
+export interface CampoDeCuerpoGuardado {
+  readonly key: string;
+  readonly kind: 'text' | 'file';
+  readonly value?: string;
+  readonly fileId?: string | null;
+  readonly contentType?: string | null;
+  readonly enabled: boolean;
+  /** El servidor lo marca cuando el valor vive en `secret_id`. Nunca manda el valor. */
+  readonly secret?: boolean;
+}
+
+/**
+ * Fichero referenciado por un cuerpo. **Metadatos, nunca bytes** (§2.2).
+ */
+export interface FicheroGuardado {
+  readonly id: string;
+  readonly fileName: string;
+  readonly contentType: string | null;
+  readonly sizeBytes: number | null;
+  readonly checksumSha256?: string | null;
+  readonly purpose?: string | null;
+}
+
 /** Una petición guardada, en la forma que devuelve la API. */
 export interface Peticion {
   readonly id: string;
@@ -139,7 +186,20 @@ export interface Peticion {
   readonly queryParams: readonly ParGuardado[];
   readonly bodyType: string;
   readonly body: string | null;
+  /** §2.1: sólo en `form_urlencoded` y `multipart_form_data`. */
+  readonly bodyFields: readonly CampoDeCuerpoGuardado[];
+  /** §2.1: sólo en `binary_file`. */
+  readonly binaryFile: FicheroGuardado | null;
   readonly sortKey: string | null;
+  /**
+   * `api_requests.lock_version`. Bloqueo optimista del esquema
+   * (`03-organization.prisma`), y la pieza con la que el autoguardado detecta
+   * que **otro** ha escrito encima.
+   *
+   * `null` cuando el servidor no lo manda; entonces la detección de conflicto
+   * no es posible y la interfaz lo dice en vez de fingir que vigila.
+   */
+  readonly lockVersion: number | null;
   readonly createdAt: string | null;
   readonly updatedAt: string | null;
 }
@@ -155,10 +215,27 @@ export interface EntradaCrearPeticion {
   readonly queryParams?: readonly ParGuardado[];
   readonly bodyType?: string;
   readonly body?: string | null;
+  readonly bodyContentType?: string | null;
+  readonly bodyFields?: readonly CampoDeCuerpoGuardado[];
+  readonly binaryFileId?: string | null;
   readonly sortKey?: string | null;
 }
 
-export type EntradaActualizarPeticion = Partial<EntradaCrearPeticion>;
+export type EntradaActualizarPeticion = Partial<EntradaCrearPeticion> & {
+  /**
+   * Versión que el cliente cree estar editando. Viaja para que el servidor
+   * pueda rechazar una escritura sobre una fila ya cambiada.
+   *
+   * HUECO MEDIDO HOY: `request.repository.ts:367` hace
+   * `lockVersion: { increment: 1 }` **sin** condición `WHERE lock_version = ?`,
+   * o sea que el servidor NO comprueba nada todavía y el último que escribe
+   * gana. El campo se manda igualmente (Zod lo descarta sin error) para que el
+   * día que el ámbito A lo implemente no haya que tocar el cliente. Mientras
+   * tanto la detección se hace **a posteriori**, comparando la versión
+   * devuelta con la esperada: ver `stores/constructor.ts`.
+   */
+  readonly lockVersion?: number | null;
+};
 
 /**
  * Respuesta de `GET /requests/:requestId/curl`, la **única** salida cuya forma
@@ -310,11 +387,54 @@ function normalizarMetodo(valor: unknown): MetodoDePeticion {
  */
 export function normalizarModoDeCuerpo(valor: unknown): string {
   if (typeof valor !== 'string') return 'none';
-  const conocidos: readonly string[] = [
-    ...MODOS_DE_CUERPO_GUARDADO,
-    ...MODOS_DE_CUERPO_SOLO_LECTURA,
-  ];
+  const conocidos: readonly string[] = MODOS_DE_CUERPO_DEL_ESQUEMA;
   return conocidos.includes(valor) ? valor : 'none';
+}
+
+/** Metadatos de un fichero. Si no hay `id` utilizable, no hay fichero. */
+export function normalizarFichero(valor: unknown): FicheroGuardado | null {
+  if (!esObjeto(valor)) return null;
+  const id = typeof valor.id === 'string' ? valor.id : '';
+  if (id.length === 0) return null;
+  const tam = valor.sizeBytes;
+  return {
+    id,
+    fileName: typeof valor.fileName === 'string' ? valor.fileName : 'fichero',
+    contentType: textoONulo(valor.contentType),
+    sizeBytes: typeof tam === 'number' && Number.isFinite(tam) ? tam : null,
+    checksumSha256: textoONulo(valor.checksumSha256),
+    purpose: textoONulo(valor.purpose),
+  };
+}
+
+/**
+ * Campos del cuerpo. El XOR del esquema se aplica **también al leer**: si el
+ * servidor mandase las dos fuentes, manda `kind`. Dejar pasar las dos
+ * produciría una fila que al reguardarla violaría `ck_bodyfield_xor` con un
+ * 500 que el usuario no podría explicar.
+ */
+export function normalizarCamposDeCuerpo(valor: unknown): CampoDeCuerpoGuardado[] {
+  if (!Array.isArray(valor)) return [];
+  const campos: CampoDeCuerpoGuardado[] = [];
+  for (const crudo of valor) {
+    if (!esObjeto(crudo)) continue;
+    const key = typeof crudo.key === 'string' ? crudo.key : null;
+    if (key === null) continue;
+    const fileId = textoONulo(crudo.fileId);
+    const kind: 'text' | 'file' =
+      crudo.kind === 'file' || (crudo.kind === undefined && fileId !== null) ? 'file' : 'text';
+    campos.push({
+      key,
+      kind,
+      ...(kind === 'file'
+        ? { fileId }
+        : { value: typeof crudo.value === 'string' ? crudo.value : '' }),
+      contentType: textoONulo(crudo.contentType),
+      enabled: crudo.enabled === undefined ? true : crudo.enabled === true,
+      secret: crudo.secret === true,
+    });
+  }
+  return campos;
 }
 
 function normalizarPares(valor: unknown): ParGuardado[] {
@@ -370,7 +490,13 @@ export function normalizarPeticion(crudo: unknown, collectionId = ''): Peticion 
     queryParams: normalizarPares(origen.queryParams),
     bodyType: normalizarModoDeCuerpo(origen.bodyType),
     body: typeof origen.body === 'string' ? origen.body : null,
+    bodyFields: normalizarCamposDeCuerpo(origen.bodyFields),
+    binaryFile: normalizarFichero(origen.binaryFile),
     sortKey: textoONulo(origen.sortKey),
+    lockVersion:
+      typeof origen.lockVersion === 'number' && Number.isFinite(origen.lockVersion)
+        ? origen.lockVersion
+        : null,
     createdAt: textoONulo(origen.createdAt),
     updatedAt: textoONulo(origen.updatedAt),
   };
@@ -511,4 +637,96 @@ export async function duplicarPeticion(requestId: string): Promise<Peticion> {
 export async function obtenerCurl(requestId: string): Promise<ComandoCurl> {
   const cuerpo = await peticionApi<unknown>(`/requests/${id(requestId)}/curl`);
   return normalizarCurl(cuerpo);
+}
+
+// ---------------------------------------------------------------------------
+// Subida de ficheros (§2.2 del BRIEF-FASE7) — P5
+// ---------------------------------------------------------------------------
+
+/** Defecto del §2.2: 10 MiB. Se comprueba **también** en el servidor (413). */
+export const LIMITE_DE_FICHERO_BYTES = 10 * 1024 * 1024;
+
+/**
+ * `POST /workspaces/:workspaceId/files`, `multipart/form-data`, campo `file`.
+ *
+ * POR QUÉ ESTA ÚNICA FUNCIÓN NO PASA POR `peticionApi`, QUE ES LA REGLA
+ * ------------------------------------------------------------------------
+ * `peticionApi` serializa el cuerpo con `JSON.stringify` y fija
+ * `content-type: application/json`. Una subida multiparte necesita que el
+ * navegador ponga él el `Content-Type` **con su `boundary`**, cosa que sólo
+ * hace si no se le fija la cabecera y se le pasa un `FormData`. No hay forma
+ * de expresar eso con el cliente actual.
+ *
+ * `api/cliente.ts` **no es de este ámbito** (§3 del `BRIEF-FASE7`), así que no
+ * se toca: queda pedido en el informe que se le añada soporte de `FormData` y
+ * que esta función se migre. Mientras tanto se replican aquí, explícitamente,
+ * las tres reglas que esa capa existe para imponer:
+ *   1. `credentials: 'include'` — la sesión va en cookie `HttpOnly` (C-31).
+ *   2. testigo CSRF en la cabecera `x-ceiba-csrf`, por ser mutante.
+ *   3. nada en `localStorage`.
+ * Y los errores se traducen al mismo vocabulario (`ErrorDeApi`/`ErrorDeRed`)
+ * para que la interfaz no tenga dos redacciones del mismo fallo.
+ */
+export async function subirFichero(
+  workspaceId: string,
+  fichero: File,
+  proposito: 'form_field_file' | 'request_body_binary' = 'form_field_file',
+): Promise<FicheroGuardado> {
+  if (fichero.size > LIMITE_DE_FICHERO_BYTES) {
+    // Se corta aquí para no gastar la subida entera y recibir un 413: el
+    // servidor vuelve a comprobarlo, esto es sólo cortesía.
+    throw new ErrorDeApi(
+      413,
+      'fichero_demasiado_grande',
+      `El fichero supera el límite de ${Math.round(LIMITE_DE_FICHERO_BYTES / (1024 * 1024))} MiB.`,
+    );
+  }
+
+  const formulario = new FormData();
+  formulario.append('file', fichero, fichero.name);
+  formulario.append('purpose', proposito);
+
+  const cabeceras: Record<string, string> = { accept: 'application/json' };
+  const testigo = testigoCsrfActual();
+  if (testigo !== null) cabeceras[NOMBRE_CABECERA_CSRF] = testigo;
+
+  let respuesta: Response;
+  try {
+    respuesta = await fetch(`${BASE_API}/workspaces/${id(workspaceId)}/files`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: cabeceras,
+      body: formulario,
+    });
+  } catch (error) {
+    throw new ErrorDeRed('No se pudo contactar con la API de CEIBA.', error);
+  }
+
+  if (!respuesta.ok) {
+    let codigo = 'error_http';
+    let mensaje = `La API respondió ${respuesta.status}.`;
+    try {
+      const cuerpo = (await respuesta.json()) as { error?: unknown; mensaje?: unknown };
+      if (typeof cuerpo.error === 'string') codigo = cuerpo.error;
+      if (typeof cuerpo.mensaje === 'string') mensaje = cuerpo.mensaje;
+    } catch {
+      // Cuerpo no JSON: se queda el mensaje genérico.
+    }
+    throw new ErrorDeApi(respuesta.status, codigo, mensaje);
+  }
+
+  // El §2.2 fija la forma del objeto, no la del envoltorio. Se toleran los
+  // tres que un servidor razonable usaría, igual que hace `desenvolverUno`
+  // con las peticiones.
+  const cuerpo: unknown = await respuesta.json();
+  const interior = esObjeto(cuerpo) ? (cuerpo.fichero ?? cuerpo.file ?? cuerpo) : cuerpo;
+  const fila = normalizarFichero(desenvolverUno(interior));
+  if (fila === null) {
+    throw new ErrorDeApi(
+      502,
+      'respuesta_incompleta',
+      'El servidor aceptó el fichero pero no devolvió su identificador.',
+    );
+  }
+  return fila;
 }

@@ -128,19 +128,102 @@ export interface Par {
 }
 
 /**
- * Modos de cuerpo que la interfaz sabe componer hoy. El contrato del motor
- * admite además `form`, `urlencoded`, `binary` y `graphql`; esos quedan fuera
- * de esta entrega y por eso NO están en la unión: un modo que la interfaz no
- * sabe serializar no debe ser seleccionable.
+ * Modos de cuerpo que la interfaz sabe componer.
+ *
+ * FASE 7, P5. Antes eran tres (`none`, `raw`, `json`) y el comentario de este
+ * mismo sitio decía que los demás quedaban fuera «porque la interfaz no sabe
+ * serializarlos». Ya los sabe: se añaden los dos de formulario y el binario,
+ * que son exactamente los que pidió el cliente («en el cuerpo de la petición
+ * me debe permitir agregar formdata, binario»).
+ *
+ * LOS NOMBRES NUEVOS SON LOS DEL SERVIDOR, a propósito. `raw` y `json` se
+ * conservan con su nombre histórico porque hay código y pruebas escritos
+ * contra ellos y renombrarlos no añadiría nada; los tres nuevos se llaman
+ * `form_urlencoded`, `multipart_form_data` y `binary_file` igual que en
+ * `body_mode`, para que la traducción a la fila guardada sea la identidad y no
+ * haya una tabla más donde equivocarse.
+ *
+ * **Siguen sin ser seleccionables los que no se saben componer**: `custom` no
+ * tiene forma definida. Al LEER sí se toleran los diez del enum — decisión de
+ * la fase 6 que el `BRIEF-FASE7` §3.C.3 manda mantener.
  */
-export const MODOS_DE_CUERPO = ['none', 'raw', 'json'] as const;
+export const MODOS_DE_CUERPO = [
+  'none',
+  'raw',
+  'json',
+  'form_urlencoded',
+  'multipart_form_data',
+  'binary_file',
+] as const;
 export type ModoDeCuerpo = (typeof MODOS_DE_CUERPO)[number];
+
+/** Los que se componen con filas clave/valor. */
+export function esModoDeFormulario(modo: ModoDeCuerpo): boolean {
+  return modo === 'form_urlencoded' || modo === 'multipart_form_data';
+}
+
+/** Los que se componen escribiendo texto en el editor. */
+export function esModoCrudo(modo: ModoDeCuerpo): boolean {
+  return modo === 'raw' || modo === 'json';
+}
+
+/**
+ * Fichero ya subido al servidor. **Nunca lleva los bytes**: el §2.2 del
+ * `BRIEF-FASE7` es explícito («nunca bytes al cliente web»). Lo que la
+ * interfaz guarda es la referencia y lo justo para poder enseñar al usuario
+ * qué adjuntó: nombre, tipo y tamaño.
+ */
+export interface FicheroDeCuerpo {
+  readonly id: string;
+  readonly fileName: string;
+  readonly contentType: string | null;
+  readonly sizeBytes: number | null;
+}
+
+/**
+ * Una fila de un cuerpo de formulario.
+ *
+ * `tipo` es el conmutador texto/fichero que pide el §3.C.3. El esquema impone
+ * que haya **como mucho una** fuente de valor por campo (`ck_bodyfield_xor`),
+ * así que aquí también son excluyentes: al pasar a `fichero` el texto deja de
+ * contar, y al revés. No se borra el otro valor para que cambiar de idea no
+ * cueste volver a teclearlo, pero sólo se envía el que corresponde al `tipo`.
+ */
+export interface CampoDeCuerpo {
+  readonly id: string;
+  nombre: string;
+  tipo: 'texto' | 'fichero';
+  valor: string;
+  fichero: FicheroDeCuerpo | null;
+  activo: boolean;
+}
 
 export interface CuerpoDeSolicitud {
   modo: ModoDeCuerpo;
   contenido: string;
   /** `null` = se deduce del modo (`json` → `application/json`). */
   tipoContenido: string | null;
+  /**
+   * Filas de `form_urlencoded` / `multipart_form_data`.
+   *
+   * OPCIONAL A PROPÓSITO, no por descuido: hay código y pruebas que construyen
+   * un `CuerpoDeSolicitud` con tres campos desde antes de la fase 7, y
+   * hacerlos obligatorios rompería el `typecheck` de ficheros que no son de
+   * este ámbito. Quien lee debe usar `camposDeCuerpo()`.
+   */
+  campos?: CampoDeCuerpo[];
+  /** El único fichero de `binary_file`. */
+  ficheroBinario?: FicheroDeCuerpo | null;
+}
+
+/** Filas del cuerpo, nunca `undefined`. */
+export function camposDeCuerpo(cuerpo: CuerpoDeSolicitud): readonly CampoDeCuerpo[] {
+  return cuerpo.campos ?? [];
+}
+
+/** Filas que de verdad se envían: activas y con nombre. */
+export function camposActivosDeCuerpo(cuerpo: CuerpoDeSolicitud): readonly CampoDeCuerpo[] {
+  return camposDeCuerpo(cuerpo).filter((c) => c.activo && c.nombre.trim().length > 0);
 }
 
 export interface SolicitudPreparada {
@@ -459,11 +542,44 @@ function obtenerFetch(opciones: OpcionesDeEjecucion): FuncionFetch {
   return globalThis.fetch.bind(globalThis);
 }
 
+/**
+ * Serializa a texto las filas de un `form_urlencoded`.
+ *
+ * Sólo las de texto: una fila de fichero **no se puede** urlencodear, y
+ * fabricar `campo=nombre-del-fichero.pdf` sería exactamente la «equivalencia
+ * falsa» que el prompt maestro prohíbe. Las de fichero se declaran en
+ * `limitacionesDeEnvioDelCuerpo()`.
+ */
+export function serializarUrlencoded(cuerpo: CuerpoDeSolicitud): string {
+  const partes: string[] = [];
+  for (const campo of camposActivosDeCuerpo(cuerpo)) {
+    if (campo.tipo !== 'texto') continue;
+    partes.push(
+      `${encodeURIComponent(campo.nombre.trim())}=${encodeURIComponent(campo.valor)}`,
+    );
+  }
+  return partes.join('&');
+}
+
 function cuerpoParaEnviar(solicitud: SolicitudPreparada): string | undefined {
-  if (solicitud.cuerpo.modo === 'none') return undefined;
+  const cuerpo = solicitud.cuerpo;
+  if (cuerpo.modo === 'none') return undefined;
   if (!metodoAdmiteCuerpo(solicitud.metodo)) return undefined;
-  if (solicitud.cuerpo.contenido.length === 0) return undefined;
-  return solicitud.cuerpo.contenido;
+  if (cuerpo.modo === 'form_urlencoded') {
+    const texto = serializarUrlencoded(cuerpo);
+    return texto.length === 0 ? undefined : texto;
+  }
+  /*
+   * `multipart_form_data` y `binary_file` NO se serializan aquí y eso no es
+   * una carencia que se tape: los bytes del fichero viven en el servidor
+   * (`files.storage_key`), no en la pestaña del usuario, así que el navegador
+   * **no los tiene**. Mandar el nombre del fichero como si fuese su contenido
+   * sería enviar algo distinto de lo que el usuario ve. Se devuelve
+   * `undefined` y la limitación se dice en pantalla.
+   */
+  if (esModoDeFormulario(cuerpo.modo) || cuerpo.modo === 'binary_file') return undefined;
+  if (cuerpo.contenido.length === 0) return undefined;
+  return cuerpo.contenido;
 }
 
 /** Tipo de contenido efectivo: el explícito, o el que implica el modo. */
@@ -471,7 +587,61 @@ export function tipoDeContenidoDe(cuerpo: CuerpoDeSolicitud): string | null {
   if (cuerpo.modo === 'none') return null;
   const explicito = cuerpo.tipoContenido?.trim() ?? '';
   if (explicito.length > 0) return explicito;
-  return cuerpo.modo === 'json' ? 'application/json' : 'text/plain';
+  switch (cuerpo.modo) {
+    case 'json':
+      return 'application/json';
+    case 'form_urlencoded':
+      return 'application/x-www-form-urlencoded';
+    /*
+     * Sin `boundary`. El `boundary` lo tiene que poner quien compone de
+     * verdad el cuerpo —el motor— porque forma parte de los bytes. Escribir
+     * aquí uno inventado haría que la cabecera y el cuerpo no coincidiesen.
+     */
+    case 'multipart_form_data':
+      return 'multipart/form-data';
+    case 'binary_file':
+      return cuerpo.ficheroBinario?.contentType ?? 'application/octet-stream';
+    default:
+      return 'text/plain';
+  }
+}
+
+/**
+ * Lo que este cuerpo NO podrá enviarse tal cual, dicho antes de pulsar Enviar.
+ *
+ * §18 del prompt maestro y §2.4 del `BRIEF-FASE6`: cuando algo no se puede
+ * representar, se declara. Aquí es literal — el usuario adjunta un fichero que
+ * vive en el servidor y el navegador no puede subírselo al destino por sí
+ * mismo— y callarlo produciría un envío silenciosamente incompleto.
+ */
+export function limitacionesDeEnvioDelCuerpo(
+  cuerpo: CuerpoDeSolicitud,
+  adaptador: IdDeAdaptador,
+): string[] {
+  const notas: string[] = [];
+  const conFichero = camposActivosDeCuerpo(cuerpo).filter((c) => c.tipo === 'fichero');
+
+  if (cuerpo.modo === 'form_urlencoded' && conFichero.length > 0) {
+    notas.push(
+      `Un cuerpo urlencoded no puede llevar ficheros: ${conFichero
+        .map((c) => c.nombre.trim())
+        .join(', ')} no se enviará. Cambia a formulario multiparte.`,
+    );
+  }
+
+  if (adaptador === 'navegador' && (esModoDeFormulario(cuerpo.modo) || cuerpo.modo === 'binary_file')) {
+    notas.push(
+      'El modo directo del navegador no puede componer este cuerpo: los ficheros ' +
+        'adjuntos están guardados en el servidor y la pestaña no tiene sus bytes. ' +
+        'Usa «A través del motor de CEIBA».',
+    );
+  }
+
+  if (cuerpo.modo === 'binary_file' && (cuerpo.ficheroBinario ?? null) === null) {
+    notas.push('El cuerpo binario no tiene ningún fichero seleccionado todavía.');
+  }
+
+  return notas;
 }
 
 /**
@@ -708,8 +878,39 @@ export const adaptadorDeApi: PuertoDeEjecucion = {
         .filter((p) => p.nombre.trim() !== '')
         .map((p) => ({ key: p.nombre, value: p.valor, enabled: p.activo }));
 
+    /*
+     * FASE 7, P5. Los modos nuevos no caben en un `body` de texto, así que
+     * viajan en los campos del §2.1 del `BRIEF-FASE7` (`bodyFields`,
+     * `binaryFileId`). Van **además** de `body`, no en su lugar, y sólo cuando
+     * el modo los pide: un servidor que todavía no los conozca los ignora
+     * (el DTO de la API valida con Zod sin `.strict()`, comprobado), y uno que
+     * sí los conozca compone el cuerpo de verdad.
+     *
+     * DEUDA DECLARADA: el §2.1 fija estos campos para `POST
+     * /collections/:id/requests` y `PATCH /requests/:id`, **no** para la ruta
+     * de ejecución. Se mandan igualmente porque son aditivos e inocuos; va
+     * escrito en el informe como petición al ámbito A.
+     */
+    const cuerpo = solicitud.cuerpo;
     const cuerpoEnviado =
-      solicitud.cuerpo.modo === 'none' ? null : (solicitud.cuerpo.contenido ?? null);
+      cuerpo.modo === 'none'
+        ? null
+        : cuerpo.modo === 'form_urlencoded'
+          ? serializarUrlencoded(cuerpo)
+          : esModoDeFormulario(cuerpo.modo) || cuerpo.modo === 'binary_file'
+            ? null
+            : (cuerpo.contenido ?? null);
+
+    const camposDelCuerpo = esModoDeFormulario(cuerpo.modo)
+      ? camposActivosDeCuerpo(cuerpo).map((campo) => ({
+          key: campo.nombre.trim(),
+          kind: campo.tipo === 'fichero' ? 'file' : 'text',
+          ...(campo.tipo === 'fichero'
+            ? { fileId: campo.fichero?.id ?? null }
+            : { value: campo.valor }),
+          enabled: true,
+        }))
+      : undefined;
 
     try {
       const respuesta = await peticionApi<RespuestaDeEjecucionApi>(
@@ -724,8 +925,11 @@ export const adaptadorDeApi: PuertoDeEjecucion = {
             url: solicitud.url,
             headers: aPares(solicitud.cabeceras),
             queryParams: aPares(solicitud.parametros),
-            bodyType: solicitud.cuerpo.modo,
+            bodyType: cuerpo.modo,
             body: cuerpoEnviado,
+            bodyFields: camposDelCuerpo,
+            binaryFileId:
+              cuerpo.modo === 'binary_file' ? (cuerpo.ficheroBinario?.id ?? null) : undefined,
           },
           senal: opciones.senal,
         },
