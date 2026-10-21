@@ -1,3 +1,4 @@
+import { aBytesDePrisma } from '../../auth/principal.ts';
 import type { RolDeWorkspace } from '../../guards/roles.ts';
 import { esRolDeWorkspace } from '../../guards/roles.ts';
 import type {
@@ -168,7 +169,7 @@ export class RepositorioDeSesionesPrisma implements RepositorioDeSesiones {
       data: {
         userId: datos.userId,
         tokenSelector: datos.tokenSelector,
-        tokenVerifierHash: datos.tokenVerifierHash,
+        tokenVerifierHash: aBytesDePrisma(datos.tokenVerifierHash),
         parentSessionId: datos.parentSessionId,
         userAgent: datos.userAgent,
         clientIp: datos.clientIp,

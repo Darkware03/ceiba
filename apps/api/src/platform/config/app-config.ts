@@ -257,9 +257,20 @@ export function cargarConfiguracion(entorno: NodeJS.ProcessEnv): ConfiguracionAp
     csrfSecret: env.CEIBA_CSRF_SECRET,
     driverPersistencia: env.CEIBA_PERSISTENCE_DRIVER,
     databaseUrl: env.DATABASE_URL,
-    engineUrl: process.env.CEIBA_ENGINE_URL ?? 'http://engine:3001',
-    engineToken: process.env.CEIBA_ENGINE_TOKEN ?? '',
-    engineTimeoutMs: Number(process.env.CEIBA_ENGINE_TIMEOUT_MS ?? 30000),
+    // EL BLOQUE `engine` ANIDADO, NO TRES CLAVES SUELTAS.
+    //
+    // Hasta la fase 4 esto devolvia `engineUrl`/`engineToken`/`engineTimeoutMs`
+    // en la raiz, pero `ConfiguracionApp` declara `engine?: { url, token,
+    // timeoutMs }`. Como la propiedad es OPCIONAL, `config.engine?.url` valia
+    // `undefined` sin una sola queja del compilador y `studio-core.service.ts`
+    // caia a su respaldo `http://engine:3001`, que es el nombre de servicio de
+    // Docker: fuera de Docker no resuelve. Resultado: TODA ejecucion HTTP
+    // moria con `ENGINE_UNREACHABLE` mientras la ruta devolvia 2xx.
+    engine: Object.freeze({
+      url: process.env['CEIBA_ENGINE_URL'] ?? 'http://engine:3001',
+      token: process.env['CEIBA_ENGINE_TOKEN'] ?? '',
+      timeoutMs: Number(process.env['CEIBA_ENGINE_TIMEOUT_MS'] ?? 30000),
+    }),
   });
 }
 

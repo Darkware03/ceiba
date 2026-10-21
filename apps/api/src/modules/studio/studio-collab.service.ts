@@ -1,13 +1,25 @@
 import { CLIENTE_PRISMA } from '../../platform/persistence/prisma/prisma-client.ts';
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
+
+import {
+  BYTES_SELECTOR,
+  BYTES_VERIFICADOR,
+  descomponerTestigo,
+  hashearVerificador,
+  verificadorCoincide,
+} from '../../platform/crypto/session-token.js';
 
 import {
   ACCION_AUDITORIA,
   SERVICIO_DE_AUDITORIA,
   type ServicioDeAuditoria,
 } from '../../platform/audit/ports.js';
-import type { Principal as PrincipalAutenticado } from '../../platform/auth/principal.js';
+import {
+  aBytesDePrisma,
+  idDeUsuario,
+  type Principal as PrincipalAutenticado,
+} from '../../platform/auth/principal.js';
 import {
   AccesoProhibido as ErrorAccesoDenegado,
   ConflictoDeEstado as ErrorConflicto,
@@ -38,16 +50,39 @@ export class StudioCollaborationService {
     workspaceId: string,
     principal: PrincipalAutenticado,
     rolMinimo: RolColaboracion,
-  ): Promise<{ workspace: { id: string; name: string; slug: string; ownerId: string }; rol: RolColaboracion }> {
+  ): Promise<{
+    workspace: {
+      id: string;
+      name: string;
+      slug: string;
+      ownerUserId: string;
+      historyRetentionDays: number;
+    };
+    rol: RolColaboracion;
+  }> {
+    // `ownerUserId`, no `ownerId`: el campo del esquema esta denormalizado desde
+    // `workspace_members` y se llama asi. Este `select` lo ejecuta TODO metodo
+    // publico del modulo, de modo que el nombre equivocado tumbaba las 27 rutas
+    // antes de llegar a ninguna otra consulta.
     const ws = await this.prisma.client.workspace.findFirst({
       where: { id: workspaceId, deletedAt: null },
-      select: { id: true, name: true, slug: true, ownerId: true },
+      // `historyRetentionDays` viaja aqui porque `request_history.expires_at` y
+      // `collection_runs.expires_at` son OBLIGATORIOS y sin default: cada
+      // insercion necesita la politica del workspace, y esta consulta ya se
+      // ejecuta en todas las rutas. Evita un viaje extra por peticion.
+      select: {
+        id: true,
+        name: true,
+        slug: true,
+        ownerUserId: true,
+        historyRetentionDays: true,
+      },
     });
     if (!ws) {
       throw new ErrorNoEncontrado('El espacio de trabajo no existe.');
     }
 
-    if (principal.esPlatformAdmin || ws.ownerId === principal.userId) {
+    if (principal.esPlatformAdmin || ws.ownerUserId === idDeUsuario(principal)) {
       return { workspace: ws, rol: 'owner' };
     }
 
@@ -55,7 +90,7 @@ export class StudioCollaborationService {
       where: {
         workspaceId_userId: {
           workspaceId,
-          userId: principal.userId,
+          userId: idDeUsuario(principal),
         },
       },
       select: { role: true },
@@ -80,7 +115,7 @@ export class StudioCollaborationService {
 
     const [owner, miembros] = await Promise.all([
       this.prisma.client.user.findUnique({
-        where: { id: workspace.ownerId },
+        where: { id: workspace.ownerUserId },
         select: { id: true, email: true, displayName: true },
       }),
       this.prisma.client.workspaceMember.findMany({
@@ -97,7 +132,7 @@ export class StudioCollaborationService {
       userId: m.userId,
       email: m.user.email,
       displayName: m.user.displayName,
-      role: m.userId === workspace.ownerId ? ('owner' as const) : (m.role as RolColaboracion),
+      role: m.userId === workspace.ownerUserId ? ('owner' as const) : (m.role as RolColaboracion),
       permissions: {
         canView: true,
         canExecute: (JERARQUIA_ROLES[m.role as RolColaboracion] ?? 0) >= JERARQUIA_ROLES.executor,
@@ -142,7 +177,7 @@ export class StudioCollaborationService {
     const rows = await this.prisma.client.invitation.findMany({
       where: { workspaceId },
       include: {
-        invitedBy: { select: { id: true, email: true, displayName: true } },
+        invitedByUser: { select: { id: true, email: true, displayName: true } },
       },
       orderBy: { createdAt: 'desc' },
       take: 50,
@@ -158,7 +193,7 @@ export class StudioCollaborationService {
       expiresAt: inv.expiresAt.toISOString(),
       acceptedAt: inv.acceptedAt?.toISOString() ?? null,
       createdAt: inv.createdAt.toISOString(),
-      invitedBy: inv.invitedBy,
+      invitedBy: inv.invitedByUser,
     }));
   }
 
@@ -173,8 +208,18 @@ export class StudioCollaborationService {
     const rolAsignado = input.role || 'viewer';
     const dias = Math.min(Math.max(input.expiresInDays ?? 7, 1), 30);
 
-    const rawToken = randomBytes(24).toString('base64url');
-    const tokenHash = createHash('sha256').update(rawToken).digest('hex');
+    // PATRON SELECTOR/VERIFICADOR, no un hash unico.
+    //
+    // El codigo original guardaba `tokenHash` (sha256 hex) en una columna que no
+    // existe y buscaba por ella con `findUnique`, lo que Prisma rechaza porque
+    // el unico indice unico de `invitations` es `uq_invitations_selector`. El
+    // esquema impone el mismo patron que las sesiones (ADR-0009 §2): mitad
+    // publica indexada y mitad secreta de la que solo se guarda el SHA-256.
+    // Se reutilizan los ayudantes de `platform/crypto/session-token.ts` en vez
+    // de volver a escribir la comparacion en tiempo constante.
+    const selector = randomBytes(BYTES_SELECTOR).toString('base64url');
+    const verificador = randomBytes(BYTES_VERIFICADOR).toString('base64url');
+    const rawToken = `${selector}.${verificador}`;
     const expiresAt = new Date(Date.now() + dias * 24 * 60 * 60 * 1000);
 
     const creada = await this.prisma.client.invitation.create({
@@ -182,8 +227,9 @@ export class StudioCollaborationService {
         workspaceId,
         email: emailLimpio,
         role: rolAsignado,
-        tokenHash,
-        invitedByUserId: principal.userId,
+        tokenSelector: selector,
+        tokenVerifierHash: aBytesDePrisma(hashearVerificador(verificador)),
+        invitedByUserId: idDeUsuario(principal),
         status: 'pending',
         expiresAt,
       },
@@ -191,7 +237,7 @@ export class StudioCollaborationService {
 
     await this.auditoria.registrar({
       accion: ACCION_AUDITORIA.INVITACION_CREADA,
-      actorUserId: principal.userId,
+      actorUserId: idDeUsuario(principal),
       workspaceId,
       recursoTipo: 'invitation',
       recursoId: creada.id,
@@ -218,20 +264,21 @@ export class StudioCollaborationService {
   }
 
   async obtenerInvitacionPorToken(rawToken: string) {
-    const tokenLimpio = rawToken.trim();
-    if (!tokenLimpio) {
+    const partes = descomponerTestigo(rawToken.trim());
+    if (!partes) {
       throw new ErrorValidacion('El token de invitación es obligatorio.');
     }
-    const tokenHash = createHash('sha256').update(tokenLimpio).digest('hex');
     const inv = await this.prisma.client.invitation.findUnique({
-      where: { tokenHash },
+      where: { tokenSelector: partes.selector },
       include: {
         workspace: { select: { id: true, name: true, slug: true, description: true } },
-        invitedBy: { select: { id: true, email: true, displayName: true } },
+        invitedByUser: { select: { id: true, email: true, displayName: true } },
       },
     });
 
-    if (!inv) {
+    // Mismo error para «no existe» y para «el verificador no casa»: distinguirlos
+    // convertiria el endpoint en un oraculo de selectores validos.
+    if (!inv || !verificadorCoincide(partes.verificador, inv.tokenVerifierHash)) {
       throw new ErrorNoEncontrado('La invitación no existe o el enlace es inválido.');
     }
 
@@ -246,25 +293,30 @@ export class StudioCollaborationService {
       modeLabel: inv.role === 'viewer' ? 'Solo mostrar (Lectura)' : 'Mostrar y editar (Colaborador)',
       expiresAt: inv.expiresAt.toISOString(),
       workspace: inv.workspace,
-      invitedBy: inv.invitedBy,
+      invitedBy: inv.invitedByUser,
     };
   }
 
   async aceptarInvitacion(rawToken: string, principal: PrincipalAutenticado) {
-    const tokenLimpio = rawToken.trim();
-    if (!tokenLimpio) {
+    const partes = descomponerTestigo(rawToken.trim());
+    if (!partes) {
       throw new ErrorValidacion('El token de invitación es obligatorio.');
     }
-    const tokenHash = createHash('sha256').update(tokenLimpio).digest('hex');
 
     const inv = await this.prisma.client.invitation.findUnique({
-      where: { tokenHash },
+      where: { tokenSelector: partes.selector },
       include: {
-        workspace: { select: { id: true, name: true, slug: true, ownerId: true, deletedAt: true } },
+        workspace: {
+          select: { id: true, name: true, slug: true, ownerUserId: true, deletedAt: true },
+        },
       },
     });
 
-    if (!inv || inv.workspace.deletedAt) {
+    if (
+      !inv ||
+      !verificadorCoincide(partes.verificador, inv.tokenVerifierHash) ||
+      inv.workspace.deletedAt
+    ) {
       throw new ErrorNoEncontrado('La invitación no existe o el espacio fue eliminado.');
     }
 
@@ -277,19 +329,21 @@ export class StudioCollaborationService {
     }
 
     const rolFinal: RolColaboracion =
-      inv.workspace.ownerId === principal.userId ? 'owner' : (inv.role as RolColaboracion);
+      inv.workspace.ownerUserId === idDeUsuario(principal) ? 'owner' : (inv.role as RolColaboracion);
 
     await this.prisma.client.$transaction(async (tx) => {
       await tx.workspaceMember.upsert({
         where: {
           workspaceId_userId: {
             workspaceId: inv.workspaceId,
-            userId: principal.userId,
+            userId: idDeUsuario(principal),
           },
         },
         create: {
           workspaceId: inv.workspaceId,
-          userId: principal.userId,
+          userId: idDeUsuario(principal),
+          // El propietario nunca llega aqui con rol `owner` en la tabla: el enum
+          // lo admite, pero la propiedad vive en `workspaces.owner_user_id`.
           role: rolFinal,
           invitedByUserId: inv.invitedByUserId,
         },
@@ -304,7 +358,7 @@ export class StudioCollaborationService {
           data: {
             status: 'accepted',
             acceptedAt: new Date(),
-            acceptedByUserId: principal.userId,
+            acceptedByUserId: idDeUsuario(principal),
           },
         });
       }
@@ -312,10 +366,10 @@ export class StudioCollaborationService {
 
     await this.auditoria.registrar({
       accion: ACCION_AUDITORIA.INVITACION_ACEPTADA,
-      actorUserId: principal.userId,
+      actorUserId: idDeUsuario(principal),
       workspaceId: inv.workspaceId,
       recursoTipo: 'workspace_member',
-      recursoId: principal.userId,
+      recursoId: idDeUsuario(principal),
       detalles: {
         invitationId: inv.id,
         role: rolFinal,
@@ -331,6 +385,29 @@ export class StudioCollaborationService {
     };
   }
 
+  /**
+   * Resuelve un miembro por **cualquiera de sus dos identificadores**.
+   *
+   * El controlador expone el parámetro de ruta como `:memberId`, pero el código
+   * original lo buscaba siempre por la clave compuesta `(workspaceId, userId)`.
+   * Con un `WorkspaceMember.id` real —que es lo que devuelve
+   * `GET /collaboration` en `members[].id`— la búsqueda daba 404 siempre. Ambos
+   * son `String`, así que el tipado no lo detecta: se acepta el id de fila y, si
+   * no casa, el id de usuario.
+   */
+  async #resolverMiembro(workspaceId: string, idOUsuarioId: string) {
+    const porId = await this.prisma.client.workspaceMember.findUnique({
+      where: { id: idOUsuarioId },
+      include: { user: { select: { email: true, displayName: true } } },
+    });
+    if (porId && porId.workspaceId === workspaceId) return porId;
+
+    return this.prisma.client.workspaceMember.findUnique({
+      where: { workspaceId_userId: { workspaceId, userId: idOUsuarioId } },
+      include: { user: { select: { email: true, displayName: true } } },
+    });
+  }
+
   async cambiarRolMiembro(
     workspaceId: string,
     targetUserId: string,
@@ -339,17 +416,18 @@ export class StudioCollaborationService {
   ) {
     const { workspace } = await this.verificarRolMinimo(workspaceId, principal, 'admin');
 
-    if (targetUserId === workspace.ownerId) {
+    if (targetUserId === workspace.ownerUserId) {
       throw new ErrorConflicto('No se puede cambiar el rol del propietario del espacio.');
     }
 
-    const miembro = await this.prisma.client.workspaceMember.findUnique({
-      where: { workspaceId_userId: { workspaceId, userId: targetUserId } },
-      include: { user: { select: { email: true, displayName: true } } },
-    });
+    const miembro = await this.#resolverMiembro(workspaceId, targetUserId);
 
     if (!miembro) {
       throw new ErrorNoEncontrado('El usuario no es miembro de este espacio.');
+    }
+
+    if (miembro.userId === workspace.ownerUserId) {
+      throw new ErrorConflicto('No se puede cambiar el rol del propietario del espacio.');
     }
 
     const actualizado = await this.prisma.client.workspaceMember.update({
@@ -359,12 +437,12 @@ export class StudioCollaborationService {
 
     await this.auditoria.registrar({
       accion: ACCION_AUDITORIA.MIEMBRO_ROL_CAMBIADO,
-      actorUserId: principal.userId,
+      actorUserId: idDeUsuario(principal),
       workspaceId,
       recursoTipo: 'workspace_member',
       recursoId: miembro.id,
       detalles: {
-        targetUserId,
+        targetUserId: miembro.userId,
         targetEmail: miembro.user.email,
         previousRole: miembro.role,
         newRole: nuevoRol,
@@ -385,17 +463,18 @@ export class StudioCollaborationService {
   ) {
     const { workspace } = await this.verificarRolMinimo(workspaceId, principal, 'admin');
 
-    if (targetUserId === workspace.ownerId) {
+    if (targetUserId === workspace.ownerUserId) {
       throw new ErrorConflicto('No se puede eliminar al propietario del espacio.');
     }
 
-    const miembro = await this.prisma.client.workspaceMember.findUnique({
-      where: { workspaceId_userId: { workspaceId, userId: targetUserId } },
-      include: { user: { select: { email: true, displayName: true } } },
-    });
+    const miembro = await this.#resolverMiembro(workspaceId, targetUserId);
 
     if (!miembro) {
       throw new ErrorNoEncontrado('El miembro no existe en este espacio.');
+    }
+
+    if (miembro.userId === workspace.ownerUserId) {
+      throw new ErrorConflicto('No se puede eliminar al propietario del espacio.');
     }
 
     await this.prisma.client.workspaceMember.delete({
@@ -404,12 +483,12 @@ export class StudioCollaborationService {
 
     await this.auditoria.registrar({
       accion: ACCION_AUDITORIA.MIEMBRO_ELIMINADO,
-      actorUserId: principal.userId,
+      actorUserId: idDeUsuario(principal),
       workspaceId,
       recursoTipo: 'workspace_member',
       recursoId: miembro.id,
       detalles: {
-        removedUserId: targetUserId,
+        removedUserId: miembro.userId,
         removedEmail: miembro.user.email,
       },
     });
@@ -436,7 +515,7 @@ export class StudioCollaborationService {
 
     await this.auditoria.registrar({
       accion: ACCION_AUDITORIA.INVITACION_REVOCADA,
-      actorUserId: principal.userId,
+      actorUserId: idDeUsuario(principal),
       workspaceId,
       recursoTipo: 'invitation',
       recursoId: inv.id,
@@ -471,7 +550,7 @@ export class StudioCollaborationService {
         },
         include: {
           collection: { select: { id: true, name: true } },
-          createdBy: { select: { id: true, email: true, displayName: true } },
+          createdByUser: { select: { id: true, email: true, displayName: true } },
         },
         orderBy: { createdAt: 'desc' },
         take: 40,
@@ -482,8 +561,12 @@ export class StudioCollaborationService {
       changes: auditRows.map((row) => ({
         id: row.id.toString(),
         action: row.action,
-        resourceType: row.resourceType,
-        resourceId: row.resourceId,
+        // En el esquema las columnas son `target_type` / `target_id`. Se
+        // mantienen los nombres `resourceType`/`resourceId` en la RESPUESTA
+        // porque son los que ya consume `apps/web`; lo que cambia es de donde
+        // se leen, no el contrato HTTP.
+        resourceType: row.targetType,
+        resourceId: row.targetId,
         occurredAt: row.occurredAt.toISOString(),
         actor: row.actorUser
           ? {
@@ -500,10 +583,10 @@ export class StudioCollaborationService {
         collectionName: v.collection.name,
         versionNumber: v.versionNumber,
         label: v.label,
-        changelog: v.changelog,
+        changelog: v.changeSummary,
         createdAt: v.createdAt.toISOString(),
-        createdBy: v.createdBy,
-        snapshot: v.snapshot,
+        createdBy: v.createdByUser,
+        snapshot: v.snapshotInline,
       })),
     };
   }

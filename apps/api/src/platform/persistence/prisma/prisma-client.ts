@@ -2,27 +2,55 @@ import { isAbsolute, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Logger } from '@nestjs/common';
 
+import type {
+  Collection as FilaColeccionGenerada,
+  PrismaClient as ClientePrismaGenerado,
+  Session as FilaSesionGenerada,
+  User as FilaUsuarioGenerada,
+  Workspace as FilaWorkspaceGenerada,
+  WorkspaceMember as FilaMiembroGenerada,
+} from '../../../../../../prisma/generated/client/index.js';
+
 /**
  * Acceso al cliente Prisma generado desde `prisma/schema/*.prisma`.
  *
  * ────────────────────────────────────────────────────────────────────────────
- * ESTADO REAL, SIN ADORNOS — **[NO VERIFICADO]**
+ * FASE 4 — DE DÓNDE SALEN AHORA LOS TIPOS, Y POR QUÉ SE CAMBIÓ
  *
- * El cliente **no está generado** en este árbol. El generador de
- * `prisma/schema/schema.prisma` emite a `../generated/client`, es decir
- * `prisma/generated/client`, y **`prisma/` no es mi ámbito de escritura**: el
- * `database-engineer` está trabajando ahí ahora mismo. Tampoco hay PostgreSQL
- * en este contenedor y las migraciones están prohibidas.
+ * Hasta la fase 3 este fichero declaraba **a mano** la forma del cliente: una
+ * interfaz `ClientePrismaCeiba` con 5 modelos y un `DelegadoPrisma<TFila>` con
+ * 6 operaciones y `args: unknown`. Esa fachada era falsa en tres sentidos a la
+ * vez, y los tres costaron caro:
  *
- * Consecuencias que asumo y declaro:
- *   - El código de `prisma.repositories.ts` está **escrito, no ejecutado**.
- *     Ninguna prueba de este entregable lo toca.
- *   - Los tipos se declaran aquí **a mano** y son estructurales, no los
- *     generados: hasta que exista el cliente, `tsc` no puede comprobar que los
- *     `where`/`data` encajan con el esquema.
- *   - La carga es **dinámica** y **falla cerrado**: si el cliente no existe, el
- *     arranque con `CEIBA_PERSISTENCE_DRIVER=prisma` aborta con un mensaje que
- *     dice exactamente qué falta y quién debe generarlo.
+ *   1. **Faltaban 11 de los 15 modelos** que usa `modules/studio`. Lo no
+ *      declarado caía a `any`, y de ahí los 23 `TS7006` que impedían compilar
+ *      las pruebas (`pretest`) y el `typecheck`.
+ *   2. **Faltaban 3 operaciones**: `upsert`, `delete` y `deleteMany`.
+ *   3. Y lo peor: con `args: unknown` **ningún `where`/`data`/`select` estaba
+ *      comprobado**. Un `prisma.folder` (el modelo se llama `CollectionFolder`)
+ *      o un `where: { ownerId }` (el campo se llama `ownerUserId`) compilaban
+ *      sin una queja y reventaban en tiempo de ejecución.
+ *
+ * Se eligió la **opción (b) del BRIEF-FASE4 §3.A.1**: tipar desde el cliente
+ * generado, que es la fuente real y no se puede desincronizar del esquema. La
+ * alternativa —completar la fachada a mano con los 15 modelos y los tipos de
+ * fila escritos a dedo— habría silenciado los `TS7006` sin recuperar la
+ * comprobación del punto 3, que es justo donde vivían los defectos reales.
+ *
+ * **PRECIO QUE SE PAGA, DECLARADO:** `prisma/generated/` está en `.gitignore`,
+ * así que **compilar `apps/api` exige haber generado el cliente antes**:
+ *
+ *     pnpm exec prisma generate --config prisma/prisma.config.ts
+ *
+ * El `prebuild` y el `pretest` de `apps/api` ejecutan
+ * `scripts/comprobar-cliente-prisma.mjs`, que **falla cerrado** con ese comando
+ * exacto si el cliente no está. No se genera automáticamente: `prisma/` es
+ * ámbito del `database-engineer` y generar es escribir allí.
+ *
+ * La **carga sigue siendo dinámica** (`import()` con ruta calculada) para que
+ * un despliegue con `CEIBA_PERSISTENCE_DRIVER=memory` no necesite el cliente en
+ * la imagen. El `import type` de arriba desaparece en el emitido: no crea
+ * dependencia en tiempo de ejecución, sólo en tiempo de compilación.
  * ────────────────────────────────────────────────────────────────────────────
  */
 
@@ -54,105 +82,37 @@ export function rutasCandidatasDelCliente(
   return candidatas;
 }
 
-export interface DelegadoPrisma<TFila> {
-  findFirst(args: unknown): Promise<TFila | null>;
-  findUnique(args: unknown): Promise<TFila | null>;
-  findMany(args: unknown): Promise<TFila[]>;
-  create(args: unknown): Promise<TFila>;
-  update(args: unknown): Promise<TFila>;
-  updateMany(args: unknown): Promise<{ count: number }>;
-}
+/**
+ * El cliente, con **los 41 modelos y las 9 operaciones reales** del esquema.
+ *
+ * No es un alias cosmético: es el punto exacto donde `tsc` empieza a comprobar
+ * los nombres de modelo, de campo, de relación y los valores de enum de cada
+ * consulta del árbol. Ensanchar esto a `any` vuelve a abrir el agujero entero.
+ */
+export type ClientePrismaCeiba = ClientePrismaGenerado;
 
-export interface FilaUsuarioPrisma {
-  id: string;
-  email: string;
-  emailVerifiedAt: Date | null;
-  passwordHash: string | null;
-  passwordUpdatedAt: Date | null;
-  displayName: string;
-  locale: string;
-  timezone: string;
-  status: string;
-  mfaEnabled: boolean;
-  mfaSecretId: string | null;
-  failedLoginCount: number;
-  lockedUntil: Date | null;
-  lastLoginAt: Date | null;
-  createdAt: Date;
-  updatedAt: Date;
-  deletedAt: Date | null;
-}
+/**
+ * Cliente **dentro de una transacción interactiva**. Prisma le retira ahí
+ * `$transaction`, `$connect` y compañía, así que NO es el mismo tipo que el
+ * cliente de fuera; derivarlo del propio `$transaction` evita escribir esa
+ * lista a mano y que se quede obsoleta en la siguiente versión de Prisma.
+ */
+export type TransaccionPrismaCeiba = Parameters<
+  Parameters<ClientePrismaCeiba['$transaction']>[0]
+>[0];
 
-export interface FilaSesionPrisma {
-  id: string;
-  userId: string;
-  tokenSelector: string;
-  tokenVerifierHash: Uint8Array;
-  parentSessionId: string | null;
-  userAgent: string | null;
-  clientIp: string | null;
-  deviceLabel: string | null;
-  issuedAt: Date;
-  lastSeenAt: Date;
-  absoluteExpiresAt: Date;
-  idleExpiresAt: Date;
-  revokedAt: Date | null;
-  revokedReason: string | null;
-}
-
-export interface FilaWorkspacePrisma {
-  id: string;
-  slug: string;
-  name: string;
-  description: string | null;
-  ownerUserId: string;
-  allowPublicSharing: boolean;
-  status: string;
-  createdAt: Date;
-  updatedAt: Date;
-  deletedAt: Date | null;
-}
-
-export interface FilaMiembroPrisma {
-  id: string;
-  workspaceId: string;
-  userId: string;
-  role: string;
-  status: string;
-  invitedByUserId: string | null;
-  joinedAt: Date;
-  updatedAt: Date;
-  removedAt: Date | null;
-}
-
-export interface FilaColeccionPrisma {
-  id: string;
-  workspaceId: string;
-  projectId: string | null;
-  slug: string;
-  name: string;
-  description: string | null;
-  visibility: string;
-  sortKey: string;
-  status: string;
-  lockVersion: number;
-  createdByUserId: string | null;
-  createdAt: Date;
-  updatedAt: Date;
-  deletedAt: Date | null;
-  deletedByUserId: string | null;
-}
-
-export interface ClientePrismaCeiba {
-  user: DelegadoPrisma<FilaUsuarioPrisma>;
-  session: DelegadoPrisma<FilaSesionPrisma>;
-  workspace: DelegadoPrisma<FilaWorkspacePrisma>;
-  workspaceMember: DelegadoPrisma<FilaMiembroPrisma>;
-  collection: DelegadoPrisma<FilaColeccionPrisma>;
-  $transaction<T>(fn: (tx: ClientePrismaCeiba) => Promise<T>): Promise<T>;
-  $executeRawUnsafe(sql: string, ...parametros: unknown[]): Promise<number>;
-  $disconnect(): Promise<void>;
-}
+/**
+ * Tipos de fila. Son los generados; se reexportan con el nombre que ya usaba
+ * `prisma.repositories.ts` para no tocar sus importaciones, y porque el nombre
+ * en castellano en la frontera deja claro que es la fila CRUDA del motor y no
+ * la proyección de la aplicación (`FilaUsuario`, `FilaWorkspace`, … de
+ * `persistence/records.ts`).
+ */
+export type FilaUsuarioPrisma = FilaUsuarioGenerada;
+export type FilaSesionPrisma = FilaSesionGenerada;
+export type FilaWorkspacePrisma = FilaWorkspaceGenerada;
+export type FilaMiembroPrisma = FilaMiembroGenerada;
+export type FilaColeccionPrisma = FilaColeccionGenerada;
 
 export const CLIENTE_PRISMA = Symbol('CLIENTE_PRISMA');
 
@@ -193,8 +153,13 @@ export async function cargarClientePrisma(urlBaseDeDatos: string): Promise<Clien
     );
   }
 
+  // El especificador del `import()` se calcula en tiempo de ejecución, así que
+  // TypeScript no puede tiparlo: la aserción es inherente a la carga dinámica,
+  // no un atajo para callar un error. Lo que se afirma aquí queda comprobado en
+  // `test/prisma-fachada.test.ts`, que carga el cliente real y verifica que los
+  // 15 modelos y las 9 operaciones existen de verdad en él.
   const Constructor = modulo['PrismaClient'] as
-    | (new (opciones: unknown) => ClientePrismaCeiba)
+    | (new (opciones: { adapter: unknown }) => ClientePrismaCeiba)
     | undefined;
   if (Constructor === undefined) {
     throw new ClientePrismaNoGenerado(`El módulo ${rutaUsada} no exporta PrismaClient.`);
@@ -224,7 +189,13 @@ export async function cargarClientePrisma(urlBaseDeDatos: string): Promise<Clien
   return instancia;
 }
 
-export type InstanciaClientePrisma = any;
+/**
+ * ERA `any`. Ese `any` era el verdadero conducto del problema: `StudioService`
+ * y `StudioCollaborationService` acceden por `this.prisma.client.<modelo>`, de
+ * modo que con `client: any` TODA consulta del módulo studio quedaba sin
+ * comprobar aunque la fachada estuviese bien. Ahora es el cliente real.
+ */
+export type InstanciaClientePrisma = ClientePrismaCeiba;
 
 export class PrismaClientService {
   readonly client!: InstanciaClientePrisma;

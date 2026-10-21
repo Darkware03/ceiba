@@ -44,3 +44,28 @@ export interface ContextoDePeticion {
 }
 
 export type PrincipalAutenticado = PrincipalUsuario;
+
+/**
+ * Identificador del usuario, siempre presente.
+ *
+ * El principal lleva `usuarioId` (obligatorio, el del ADR-0009) y un alias
+ * `userId` opcional que anadio el modulo `studio`. Usar el alias suelto da
+ * `string | undefined`, y escribir `undefined` en una columna de autoria la
+ * deja a NULL sin que nadie se entere. Esta funcion colapsa los dos nombres en
+ * uno y garantiza el tipo.
+ */
+export function idDeUsuario(principal: PrincipalUsuario): string {
+  return principal.userId ?? principal.usuarioId;
+}
+
+/**
+ * Convierte cualquier vista de bytes en la forma exacta que exigen las columnas
+ * `Bytes` del cliente Prisma generado (`Uint8Array<ArrayBuffer>`). El `Buffer`
+ * de Node es `Uint8Array<ArrayBufferLike>` y no es asignable: copiarlo es
+ * barato (32 bytes en todos los usos) y evita una asercion de tipo.
+ */
+export function aBytesDePrisma(datos: Uint8Array): Uint8Array<ArrayBuffer> {
+  const salida = new Uint8Array(datos.byteLength);
+  salida.set(datos);
+  return salida;
+}

@@ -1,21 +1,37 @@
 {
+  // Build de producción: sólo `src/`. Salida en `dist/`, arranque con
+  // `node dist/main.js`.
+  //
+  // ──────────────────────────────────────────────────────────────────────────
+  // FASE 4 — POR QUÉ SE REVIRTIÓ `rootDir` Y SE QUITÓ `noImplicitAny: false`.
+  //
+  // Entre el 16 y el 20 de octubre este fichero pasó a `"rootDir": "../.."` e
+  // incluyó `../../prisma/generated/client/**/*.ts`. Dos consecuencias, y las
+  // dos pasaron desapercibidas porque `tsc` terminaba con código 0:
+  //
+  //  1. **La salida se mudó de sitio.** Con la raíz en el repositorio,
+  //     `apps/api/src/main.ts` se emitía en `dist/apps/api/src/main.js`. Pero
+  //     `package.json` declara `"main": "dist/main.js"`, `start` ejecuta
+  //     `node dist/main.js` e `infra/levantar-local.sh` también. Es decir: la
+  //     compilación funcionaba y **el proceso arrancaba el `dist/main.js` viejo
+  //     del 15 de octubre, sin el módulo `studio`**. Ésa es la segunda razón,
+  //     independiente de los `TS7006`, por la que las 27 rutas nunca se habían
+  //     ejecutado. Comprobado: `dist/main.js` tenía fecha del 15 y cero
+  //     coincidencias de `studio`; `dist/apps/api/src/main.js`, del 21.
+  //  2. **`noImplicitAny: false` apagaba el aviso.** Los 23 `TS7006` que
+  //     bloqueaban `typecheck` y `pretest` no aparecían aquí, así que el build
+  //     «pasaba» mientras las pruebas eran imposibles de ejecutar.
+  //
+  // Ya no hace falta compilar el cliente generado: `prisma-client.ts` lo
+  // consume con `import type`, que desaparece en el emitido. El build vuelve a
+  // ser `src/` y nada más, con las mismas reglas estrictas que `typecheck`.
+  // ──────────────────────────────────────────────────────────────────────────
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "rootDir": "../..",
+    "rootDir": "src",
     "outDir": "dist",
-    "noEmit": false,
-    "noImplicitAny": false,
-    "noUnusedLocals": false,
-    "noUnusedParameters": false
+    "noEmit": false
   },
-  "include": ["src/**/*.ts", "../../prisma/generated/client/**/*.ts"],
-  "exclude": [
-    "dist",
-    "dist-test",
-    "node_modules",
-    "test",
-    "src/modules/studio/studio.service.ts",
-    "src/modules/studio/studio-collaboration.service.ts"
-  ]
+  "include": ["src/**/*.ts"],
+  "exclude": ["dist", "dist-test", "node_modules", "test"]
 }
-

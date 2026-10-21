@@ -17,7 +17,7 @@ import {
   UsuarioActual as PrincipalActual,
   RutaSinAutorizacionDeRecurso as RutaAutenticadaSinRecurso,
 } from '../../platform/auth/decorators.js';
-import type { PrincipalUsuario } from '../../platform/auth/principal.js';
+import { idDeUsuario, type PrincipalUsuario } from '../../platform/auth/principal.js';
 import {
   StudioCollaborationService,
   type RolColaboracion,
@@ -320,12 +320,15 @@ export class StudioController {
   ) {
     let wsId = body?.workspaceId;
     if (!wsId) {
+      // `ownerUserId` y `workspaceMembers`: ni `ownerId` ni `members` existen en
+      // el modelo `Workspace`. Con la fachada en `any` esto compilaba y Prisma
+      // lo rechazaba en ejecucion con `PrismaClientValidationError`.
       const firstWs = await this.studio['prisma'].client.workspace.findFirst({
         where: {
           deletedAt: null,
           OR: [
-            { ownerId: principal.userId },
-            { members: { some: { userId: principal.userId } } },
+            { ownerUserId: idDeUsuario(principal) },
+            { workspaceMembers: { some: { userId: idDeUsuario(principal) } } },
           ],
         },
         select: { id: true },

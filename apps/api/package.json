@@ -15,9 +15,13 @@
   "scripts": {
     "install:isolated": "pnpm install --ignore-workspace --allow-build argon2",
     "start": "node dist/main.js",
+    "prisma:check": "node scripts/comprobar-cliente-prisma.mjs",
+    "prebuild": "node scripts/comprobar-cliente-prisma.mjs",
     "build": "tsc -p tsconfig.build.json",
+    "pretypecheck": "node scripts/comprobar-cliente-prisma.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "pretest": "tsc -p tsconfig.test.json",
+    "pretest": "node scripts/comprobar-cliente-prisma.mjs && tsc -p tsconfig.test.json",
+    "ejercitar:studio": "node scripts/ejercitar-studio.mjs",
     "test": "node --test --test-reporter=spec \"dist-test/test/**/*.test.js\"",
     "test:ci": "node --test --test-reporter=tap \"dist-test/test/**/*.test.js\""
   },

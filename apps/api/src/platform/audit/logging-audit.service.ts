@@ -7,6 +7,60 @@ import type { EventoDeAuditoria, PuertoDeAuditoria } from './ports.js';
 
 const PATRON_ACCION = /^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/u;
 
+/**
+ * `audit_logs.target_type` es el enum `AuditTargetType`, no texto libre.
+ *
+ * El codigo emitia `recursoTipo` de la aplicacion directamente con un `as any`,
+ * y valores como `request_execution` o `collection_run` no estan (el primero no
+ * existe en el enum). Un valor fuera del enum aborta el INSERT entero, asi que
+ * la auditoria se perdia en silencio dentro del `catch`.
+ *
+ * Se traduce con una tabla explicita y se **falla al valor neutro `system`**,
+ * nunca al literal recibido: perder la precision del tipo es aceptable, perder
+ * el registro de auditoria no.
+ */
+const TIPOS_DE_OBJETIVO = new Set([
+  'user',
+  'session',
+  'workspace',
+  'workspace_member',
+  'invitation',
+  'project',
+  'collection',
+  'collection_folder',
+  'api_request',
+  'environment',
+  'variable',
+  'secret',
+  'auth_configuration',
+  'shared_link',
+  'share_access_code',
+  'collection_version',
+  'test_definition',
+  'collection_run',
+  'file',
+  'comment',
+  'system',
+]);
+
+const ALIAS_DE_OBJETIVO: Readonly<Record<string, string>> = Object.freeze({
+  auth: 'user',
+  request_execution: 'api_request',
+  request: 'api_request',
+  folder: 'collection_folder',
+  member: 'workspace_member',
+  run: 'collection_run',
+  env: 'environment',
+});
+
+function aTipoDeObjetivo(recursoTipo: string): 'system' {
+  const directo = ALIAS_DE_OBJETIVO[recursoTipo] ?? recursoTipo;
+  return (TIPOS_DE_OBJETIVO.has(directo) ? directo : 'system') as 'system';
+}
+
+/** `target_id` es `uuid`: un valor que no lo sea reventaria el INSERT. */
+const PATRON_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+
 const CLAVES_PROHIBIDAS = [
   'password',
   'contrasena',
@@ -27,7 +81,9 @@ export class SumideroDeAuditoriaEnLog implements PuertoDeAuditoria {
   readonly #registrados: EventoDeAuditoria[] = [];
   readonly #prisma: InstanciaClientePrisma | null;
 
-  constructor(@Optional() @Inject(CLIENTE_PRISMA) prisma?: any) {
+  constructor(
+    @Optional() @Inject(CLIENTE_PRISMA) prisma?: InstanciaClientePrisma | null,
+  ) {
     this.#prisma = prisma ?? null;
   }
 
@@ -84,19 +140,22 @@ export class SumideroDeAuditoriaEnLog implements PuertoDeAuditoria {
         });
         actorEmail = u?.email ?? null;
       }
+      // Nombres reales de `audit_logs`: `target_type`/`target_id` (no
+      // `resourceType`/`resourceId`, que no existen) y `actor_ip` (no
+      // `ipAddress`). `user_agent` no es columna: se guarda su hash, y como aqui
+      // no se calcula, no se escribe nada en vez de inventar un campo.
       await this.#prisma.auditLog.create({
         data: {
-          
-          
-          
           action: accion,
-          resourceType: recursoTipo,
-          targetType: (recursoTipo === 'auth' || recursoTipo === 'user' || recursoTipo === 'session') ? 'user' : (recursoTipo as any),
-          resourceId: recursoId,
+          workspaceId: evento.workspaceId ?? null,
+          actorUserId: evento.actorUserId ?? null,
+          sessionId: evento.sessionId ?? null,
+          targetType: aTipoDeObjetivo(recursoTipo),
+          targetId: recursoId !== null && PATRON_UUID.test(recursoId) ? recursoId : null,
+          targetLabel: actorEmail,
           outcome: evento.resultado ?? evento.outcome ?? 'success',
-          ipAddress: evento.clientIp ?? null,
-          userAgent: evento.userAgent ?? null,
-          metadata: (metadata ?? undefined) as never,
+          actorIp: evento.clientIp ?? null,
+          metadata: (metadata ?? {}) as Record<string, string>,
         },
       });
     } catch (err) {
