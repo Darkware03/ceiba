@@ -10,7 +10,8 @@
  * usuario tiene que saberlo antes de concluir que «CEIBA no puede llamar a
  * esta API».
  */
-import { computed, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
+import { CeibaLoadingScreen } from '@ceiba/brand';
 import CeibaAviso from '@/components/ui/CeibaAviso.vue';
 import CeibaBoton from '@/components/ui/CeibaBoton.vue';
 import BarraDeSolicitud from '@/components/solicitud/BarraDeSolicitud.vue';
@@ -19,9 +20,99 @@ import EditorDePares from '@/components/solicitud/EditorDePares.vue';
 import PanelDeRespuesta from '@/components/respuesta/PanelDeRespuesta.vue';
 import { usarAlmacenDeConstructor } from '@/stores/constructor';
 import { ADAPTADORES, formatearDuracion } from '@/api/ejecucion';
+import { clavesSecretas, obtenerPeticion } from '@/api/peticiones';
+import { mensajeDeError } from '@/api/errores';
+import { RUTA_COLECCION } from '@/router/nombres';
 import type { IdDeAdaptador, Par } from '@/api/ejecucion';
+import type { Peticion } from '@/api/peticiones';
+
+/**
+ * Petición guardada a abrir, si se ha llegado aquí desde una colección.
+ *
+ * Llegan por `props` desde la **query** de la ruta (`rutas.ts`), no por
+ * `useRoute()`. Así `/constructor` a secas sigue siendo el borrador en blanco
+ * de siempre y la vista se puede montar sin router, que es lo que hacen las
+ * pruebas de la fase 5.
+ */
+const props = defineProps<{ peticionId?: string; coleccionId?: string }>();
 
 const constructor = usarAlmacenDeConstructor();
+
+const peticionAbierta = ref<Peticion | null>(null);
+const cargandoPeticion = ref(false);
+const errorDePeticion = ref<string | null>(null);
+/** Lo que la petición guardada dice y este constructor no sabe representar. */
+const limitaciones = ref<string[]>([]);
+
+const destinoDeLaColeccion = computed(() =>
+  props.coleccionId === undefined
+    ? null
+    : { name: RUTA_COLECCION, params: { collectionId: props.coleccionId } },
+);
+
+/**
+ * Carga la petición guardada en el borrador.
+ *
+ * Las limitaciones que devuelva el almacén se guardan y se pintan: abrir una
+ * petición con un método o un cuerpo que el motor no admite y no decirlo
+ * dejaría al usuario enviando algo distinto de lo que tenía guardado.
+ */
+async function abrirPeticionGuardada(requestId: string): Promise<void> {
+  cargandoPeticion.value = true;
+  errorDePeticion.value = null;
+  limitaciones.value = [];
+  try {
+    const peticion = await obtenerPeticion(requestId);
+    peticionAbierta.value = peticion;
+    const notas: string[] = [];
+
+    /*
+     * Los valores secretos NO viajan: el servidor manda `value: null` y la
+     * marca `secret`. Es lo correcto, pero hay que DECIRLO. Si no, el
+     * constructor abre la petición con la cabecera presente y vacía, el envío
+     * se va con un `Authorization:` en blanco y el 401 resultante parece un
+     * fallo del destino en vez de lo que es.
+     */
+    const secretas = clavesSecretas(peticion);
+    if (secretas.length > 0) {
+      notas.push(
+        `El servidor no envía el valor de ${secretas.length === 1 ? 'el secreto' : 'los secretos'} ` +
+          `${secretas.join(', ')}: ${secretas.length === 1 ? 'aparece' : 'aparecen'} con el valor ` +
+          'vacío. Complétalo antes de enviar, o usa una variable de entorno.',
+      );
+    }
+
+    limitaciones.value = notas.concat(constructor.cargarDesdePeticionGuardada({
+      collectionId: peticion.collectionId,
+      requestId: peticion.id,
+      name: peticion.name,
+      method: peticion.method,
+      methodCustom: peticion.methodCustom,
+      url: peticion.url,
+      headers: peticion.headers.map((par) => ({ ...par })),
+      queryParams: peticion.queryParams.map((par) => ({ ...par })),
+      bodyType: peticion.bodyType,
+      body: peticion.body,
+    }));
+  } catch (error) {
+    peticionAbierta.value = null;
+    errorDePeticion.value = mensajeDeError(error);
+  } finally {
+    cargandoPeticion.value = false;
+  }
+}
+
+onMounted(() => {
+  if (props.peticionId !== undefined) void abrirPeticionGuardada(props.peticionId);
+});
+
+watch(
+  () => props.peticionId,
+  (nuevo, anterior) => {
+    if (nuevo === anterior || nuevo === undefined) return;
+    void abrirPeticionGuardada(nuevo);
+  },
+);
 
 type PestanaDeSolicitud = 'parametros' | 'cabeceras' | 'cuerpo';
 const pestana = ref<PestanaDeSolicitud>('parametros');
@@ -51,8 +142,14 @@ async function enviar(): Promise<void> {
 
 <template>
   <div class="constructor">
+    <nav v-if="destinoDeLaColeccion" class="constructor__migas" aria-label="Ruta de navegación">
+      <RouterLink :to="destinoDeLaColeccion">← Volver a la colección</RouterLink>
+    </nav>
+
     <header class="constructor__cabecera">
-      <h1>Constructor de solicitudes</h1>
+      <h1>
+        {{ peticionAbierta ? peticionAbierta.name : 'Constructor de solicitudes' }}
+      </h1>
       <label class="constructor__modo">
         <span class="constructor__modo-etiqueta">Modo de ejecución</span>
         <select
@@ -66,6 +163,38 @@ async function enviar(): Promise<void> {
         </select>
       </label>
     </header>
+
+    <div v-if="cargandoPeticion" class="constructor__espera">
+      <CeibaLoadingScreen
+        inline
+        message="Abriendo la petición…"
+        :detail="`GET /api/v1/requests/${peticionId}`"
+      />
+    </div>
+
+    <CeibaAviso v-if="errorDePeticion" tono="error" titulo="No se pudo abrir la petición">
+      {{ errorDePeticion }}
+      <p class="constructor__reintento">
+        <CeibaBoton
+          v-if="peticionId"
+          compacto
+          :cargando="cargandoPeticion"
+          @click="abrirPeticionGuardada(peticionId)"
+        >
+          Reintentar
+        </CeibaBoton>
+      </p>
+    </CeibaAviso>
+
+    <CeibaAviso
+      v-if="limitaciones.length > 0"
+      tono="aviso"
+      titulo="Esta petición guardada no se puede representar entera aquí"
+    >
+      <ul class="constructor__limitaciones">
+        <li v-for="(nota, indice) in limitaciones" :key="indice">{{ nota }}</li>
+      </ul>
+    </CeibaAviso>
 
     <CeibaAviso tono="aviso" titulo="Ejecución provisional desde el navegador">
       <p>{{ puerto.advertencia }}</p>
@@ -224,6 +353,27 @@ async function enviar(): Promise<void> {
   align-items: center;
   justify-content: space-between;
   gap: var(--ceiba-space-3);
+}
+
+.constructor__migas {
+  font-size: var(--ceiba-text-sm);
+}
+
+.constructor__espera {
+  position: relative;
+  min-height: 160px;
+}
+
+.constructor__reintento {
+  margin-top: var(--ceiba-space-2);
+}
+
+.constructor__limitaciones {
+  margin: 0;
+  padding-left: var(--ceiba-space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--ceiba-space-1);
 }
 
 .constructor__modo {

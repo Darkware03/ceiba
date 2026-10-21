@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia';
 import {
+  METODOS_PERMITIDOS,
   adaptadorPorId,
   construirUrl,
   esCabeceraProhibidaPorElNavegador,
@@ -101,6 +102,30 @@ function clonarPares(pares: readonly Par[]): Par[] {
 function cuerpoInicial(): CuerpoDeSolicitud {
   return { modo: 'none', contenido: '', tipoContenido: null };
 }
+
+/**
+ * Traducción de `body_mode` (vocabulario del servidor, diez valores) al modo
+ * del constructor (tres). `undefined` = no representable; se declara en vez de
+ * fingir una equivalencia.
+ *
+ * `multipart_form_data` y `binary_file` quedan fuera a conciencia: esta
+ * interfaz no sabe componer esos cuerpos, y abrir la petición como si fuese
+ * texto plano enviaría algo distinto de lo guardado.
+ */
+const TRADUCCION_DE_CUERPO: Readonly<
+  Record<string, { modo: ModoDeCuerpo; tipo: string | null } | undefined>
+> = Object.freeze({
+  none: { modo: 'none', tipo: null },
+  raw_json: { modo: 'json', tipo: 'application/json' },
+  raw_text: { modo: 'raw', tipo: 'text/plain' },
+  raw_xml: { modo: 'raw', tipo: 'application/xml' },
+  raw_html: { modo: 'raw', tipo: 'text/html' },
+  graphql: { modo: 'raw', tipo: 'application/json' },
+  form_urlencoded: { modo: 'raw', tipo: 'application/x-www-form-urlencoded' },
+  // Nombres heredados de quien ya llamaba a `cargarDesdePeticionGuardada`.
+  json: { modo: 'json', tipo: 'application/json' },
+  text: { modo: 'raw', tipo: 'text/plain' },
+});
 
 /** Clave del almacén. Ver arriba por qué no es `'constructor'` a secas. */
 export const ID_DEL_ALMACEN = 'constructorDeSolicitudes';
@@ -230,19 +255,57 @@ export const usarAlmacenDeConstructor = defineStore(ID_DEL_ALMACEN, {
       this.error = null;
     },
 
+    /**
+     * Vuelca una petición **guardada** (`api_requests`) en el borrador.
+     *
+     * Devuelve las **limitaciones** encontradas: lo que la petición guardada
+     * dice y el constructor no puede representar. No es decoración. El
+     * vocabulario del servidor es más ancho que el de esta interfaz en dos
+     * sitios concretos:
+     *
+     *  - `http_method` admite `TRACE` y `CUSTOM`; el contrato del motor
+     *    (`ALLOWED_METHODS`) no. Coercerlos a `GET` en silencio sería cambiar
+     *    la petición del usuario sin decírselo, así que **no se tocan**: se
+     *    deja el método anterior y se devuelve la limitación para que la
+     *    pantalla la escriba.
+     *  - `body_mode` tiene diez valores y aquí sólo hay `none | raw | json`.
+     *    Los textuales se mapean a `raw` con su tipo de contenido; los que
+     *    exigen componer un cuerpo que esta interfaz no sabe serializar
+     *    (`multipart_form_data`) se declaran.
+     *
+     * Los nombres antiguos (`'json'`, `'text'`) se siguen aceptando para no
+     * romper a quien ya llamaba a esto.
+     */
     cargarDesdePeticionGuardada(datos: {
       workspaceId?: string;
       collectionId?: string;
       requestId?: string;
       name?: string;
-      method: MetodoDeSolicitud;
+      method: MetodoDeSolicitud | string;
+      methodCustom?: string | null;
       url: string;
       headers?: ReadonlyArray<{ key: string; value: string; enabled: boolean }>;
       queryParams?: ReadonlyArray<{ key: string; value: string; enabled: boolean }>;
       bodyType?: string;
       body?: string | null;
-    }): void {
-      this.metodo = datos.method;
+    }): string[] {
+      const limitaciones: string[] = [];
+
+      const metodoPedido = String(datos.method).toUpperCase();
+      if ((METODOS_PERMITIDOS as readonly string[]).includes(metodoPedido)) {
+        this.metodo = metodoPedido as MetodoDeSolicitud;
+      } else {
+        const verbo =
+          metodoPedido === 'CUSTOM' && (datos.methodCustom ?? '').trim().length > 0
+            ? (datos.methodCustom ?? '').trim().toUpperCase()
+            : metodoPedido;
+        limitaciones.push(
+          `El método «${verbo}» está guardado pero el motor no lo ejecuta: ` +
+            `los admitidos son ${METODOS_PERMITIDOS.join(', ')}. ` +
+            `Se mantiene «${this.metodo}» en el selector; cámbialo antes de enviar.`,
+        );
+      }
+
       this.url = datos.url;
       this.cabeceras =
         datos.headers && datos.headers.length > 0
@@ -252,27 +315,26 @@ export const usarAlmacenDeConstructor = defineStore(ID_DEL_ALMACEN, {
         datos.queryParams && datos.queryParams.length > 0
           ? datos.queryParams.map((q) => nuevoPar(q.key, q.value, q.enabled))
           : [nuevoPar()];
-      // Los modos que existen son `'none' | 'raw' | 'json'`
-      // (`api/ejecucion.ts:122`). No hay modo `'text'`: lo que no es JSON y
-      // tiene cuerpo es `raw`, y el tipo de contenido es quien distingue el
-      // texto plano de un formulario codificado.
-      const modo: ModoDeCuerpo =
-        datos.bodyType === 'json'
-          ? 'json'
-          : datos.bodyType === 'text' || datos.bodyType === 'form_urlencoded'
-            ? 'raw'
-            : 'none';
-      const tipoContenido =
-        modo === 'json'
-          ? 'application/json'
-          : datos.bodyType === 'form_urlencoded'
-            ? 'application/x-www-form-urlencoded'
-            : modo === 'raw'
-              ? 'text/plain'
-              : null;
-      this.cuerpo = { modo, contenido: datos.body ?? '', tipoContenido };
+      // Los modos que existen aquí son `'none' | 'raw' | 'json'`
+      // (`api/ejecucion.ts`). No hay modo `'text'`: lo que no es JSON y tiene
+      // cuerpo es `raw`, y el tipo de contenido es quien distingue el texto
+      // plano de un formulario codificado o de un XML.
+      const guardado = datos.bodyType ?? 'none';
+      const traduccion = TRADUCCION_DE_CUERPO[guardado];
+      const modo: ModoDeCuerpo = traduccion?.modo ?? 'none';
+      const tipoContenido = traduccion?.tipo ?? null;
+
+      if (traduccion === undefined && guardado !== 'none') {
+        limitaciones.push(
+          `El tipo de cuerpo «${guardado}» no se puede componer en el ` +
+            'constructor: se abre sin cuerpo para no enviar algo distinto de lo guardado.',
+        );
+      }
+
+      this.cuerpo = { modo, contenido: modo === 'none' ? '' : (datos.body ?? ''), tipoContenido };
       this.resultado = null;
       this.error = null;
+      return limitaciones;
     },
 
     /** Vuelve a cargar en el borrador una solicitud ya ejecutada. */

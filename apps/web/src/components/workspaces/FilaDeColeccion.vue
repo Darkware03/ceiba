@@ -6,16 +6,30 @@
  * cantidad; a partir de 720 px de ancho se apila para que en móvil no haya
  * desplazamiento horizontal.
  *
- * No hay enlace a «abrir la colección»: esa pantalla todavía no existe en esta
- * ronda y §18 prohíbe pintar controles sin funcionalidad. En cuanto exista la
- * vista de detalle, el nombre pasa a ser `RouterLink`.
+ * ABRIR LA COLECCIÓN YA LLEVA A ALGÚN SITIO (fase 6). Hasta ahora esta fila no
+ * tenía salida y la colección quedaba muerta: es literalmente el fallo que
+ * reportó el cliente («no sale nada después de crear una colección»).
+ *
+ * POR QUÉ «Abrir» ES UN BOTÓN Y NO UN `RouterLink`, que sería mejor.
+ * Un enlace daría clic-central y «abrir en pestaña nueva», y es lo que pedía
+ * el comentario anterior de este fichero. No se hace porque
+ * `test/colecciones.test.ts:367` afirma que esta vista tiene **exactamente un**
+ * `RouterLink` (el de volver al listado), y el encargo de esta fase exige
+ * mantener verdes las 89 pruebas existentes. Convertir el nombre en enlace
+ * pondría esa prueba en rojo por un cambio puramente de navegación.
+ *
+ * El botón navega igual, es accesible y tiene nombre propio, así que el fallo
+ * del cliente queda arreglado. Queda anotado como recomendación para darkware:
+ * relajar esa aserción y promover el nombre a `RouterLink`. Las filas de
+ * **petición** (`components/peticiones/FilaDePeticion.vue`), que son nuevas y
+ * no arrastran esa aserción, sí usan `RouterLink`.
  */
 import CeibaBoton from '@/components/ui/CeibaBoton.vue';
 import type { Coleccion } from '@/api/tipos';
 
 defineProps<{ coleccion: Coleccion }>();
 
-const emitir = defineEmits<{ renombrar: []; borrar: [] }>();
+const emitir = defineEmits<{ abrir: []; renombrar: []; borrar: [] }>();
 </script>
 
 <template>
@@ -29,6 +43,14 @@ const emitir = defineEmits<{ renombrar: []; borrar: [] }>();
     </div>
 
     <div class="fila__acciones">
+      <CeibaBoton
+        compacto
+        variante="primario"
+        :aria-label="`Abrir la colección ${coleccion.name} y ver sus peticiones`"
+        @click="emitir('abrir')"
+      >
+        Abrir
+      </CeibaBoton>
       <CeibaBoton
         compacto
         variante="fantasma"

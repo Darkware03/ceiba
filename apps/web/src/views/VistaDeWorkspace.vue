@@ -19,7 +19,8 @@
  * ni lo intenta. Quien decide es el servidor, y no filtrar esa diferencia es
  * justamente lo correcto (§19).
  */
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, inject, onMounted, ref, watch } from 'vue';
+import { routerKey } from 'vue-router';
 import { CeibaLoadingScreen } from '@ceiba/brand';
 import CeibaAviso from '@/components/ui/CeibaAviso.vue';
 import CeibaBoton from '@/components/ui/CeibaBoton.vue';
@@ -32,7 +33,7 @@ import { usarAlmacenDeColecciones } from '@/stores/colecciones';
 import { usarAlmacenDeWorkspaces } from '@/stores/workspaces';
 // Desde `router/nombres.ts`, que es una hoja sin imports: `router/rutas.ts`
 // arrastraría los `import()` diferidos de todas las vistas.
-import { RUTA_WORKSPACES } from '@/router/nombres';
+import { RUTA_COLECCION, RUTA_WORKSPACES } from '@/router/nombres';
 import type { Coleccion } from '@/api/tipos';
 
 /** Tope de `description` en `esquemaCrearColeccion`. */
@@ -43,6 +44,17 @@ const props = defineProps<{ workspaceId: string }>();
 
 const workspaces = usarAlmacenDeWorkspaces();
 const almacen = usarAlmacenDeColecciones();
+
+/**
+ * El router, inyectado **con valor por defecto `null`**.
+ *
+ * No se usa `useRouter()` porque ese ayudante hace `inject(routerKey)` sin
+ * defecto, y este componente se monta a propósito sin router en
+ * `test/colecciones.test.ts`. Sin el defecto, Vue emite un aviso de inyección
+ * no encontrada en cada montaje de esa prueba. Con él, la navegación
+ * simplemente no ocurre fuera de la aplicación, que es lo correcto.
+ */
+const enrutador = inject(routerKey, null);
 
 const creando = ref(false);
 const aRenombrar = ref<Coleccion | null>(null);
@@ -83,6 +95,17 @@ watch(
 function abrirCreacion(): void {
   errorDeDialogo.value = null;
   creando.value = true;
+}
+
+/**
+ * Abre la colección y enseña sus peticiones.
+ *
+ * Hasta la fase 6 esto no existía y la colección quedaba muerta: el cliente
+ * reportó exactamente eso. Ver la nota de `FilaDeColeccion.vue` sobre por qué
+ * es navegación programática y no un `RouterLink`.
+ */
+function abrirColeccion(coleccion: Coleccion): void {
+  void enrutador?.push({ name: RUTA_COLECCION, params: { collectionId: coleccion.id } });
 }
 
 function abrirRenombrado(coleccion: Coleccion): void {
@@ -197,6 +220,7 @@ async function borrar(): Promise<void> {
         v-for="coleccion in lista"
         :key="coleccion.id"
         :coleccion="coleccion"
+        @abrir="abrirColeccion(coleccion)"
         @renombrar="abrirRenombrado(coleccion)"
         @borrar="abrirBorrado(coleccion)"
       />

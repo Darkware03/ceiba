@@ -23,6 +23,14 @@ export const RUTA_LOGIN = 'login';
 export const RUTA_REGISTRO = 'registro';
 export const RUTA_WORKSPACES = 'workspaces';
 export const RUTA_WORKSPACE = 'workspace';
+/**
+ * Detalle de una colección: sus peticiones.
+ *
+ * Hasta la fase 6 no existía, y por eso `FilaDeColeccion.vue` decía «esa
+ * pantalla todavía no existe en esta ronda». Abrir una colección no llevaba a
+ * ningún sitio: es el fallo que reportó el cliente.
+ */
+export const RUTA_COLECCION = 'coleccion';
 export const RUTA_CONSTRUCTOR = 'constructor';
 export const RUTA_HISTORIAL = 'historial';
 export const RUTA_ENTORNOS = 'entornos';
@@ -38,6 +46,8 @@ export const NOMBRES_RUTAS = {
   REGISTRO: RUTA_REGISTRO,
   WORKSPACES: RUTA_WORKSPACES,
   WORKSPACE_DETALLE: RUTA_WORKSPACE,
+  COLECCION: RUTA_COLECCION,
+  COLECCION_DETALLE: RUTA_COLECCION,
   CONSTRUCTOR: RUTA_CONSTRUCTOR,
   HISTORIAL: RUTA_HISTORIAL,
   ENTORNOS: RUTA_ENTORNOS,

@@ -60,9 +60,30 @@ export const rutas: RouteRecordRaw[] = [
     },
   },
   {
+    path: '/colecciones/:collectionId',
+    name: NOMBRES_RUTAS.COLECCION,
+    component: () => import('@/views/VistaDeColeccion.vue'),
+    props: true,
+    meta: {
+      titulo: 'Peticiones de la colección — CEIBA',
+    },
+  },
+  {
     path: '/constructor',
     name: NOMBRES_RUTAS.CONSTRUCTOR,
     component: () => import('@/views/VistaDeConstructor.vue'),
+    /**
+     * La petición a abrir viaja por **query**, no por path, y es deliberado:
+     * `/constructor` sin nada sigue siendo el borrador en blanco de siempre —
+     * las pruebas de la fase 5 lo montan así, sin router—. Pasarlo como
+     * `props` en vez de leer `useRoute()` dentro de la vista mantiene el
+     * componente montable sin router, que es lo que permite que esas pruebas
+     * sigan en verde.
+     */
+    props: (ruta) => ({
+      peticionId: typeof ruta.query.peticion === 'string' ? ruta.query.peticion : undefined,
+      coleccionId: typeof ruta.query.coleccion === 'string' ? ruta.query.coleccion : undefined,
+    }),
     meta: {
       titulo: 'Constructor HTTP — CEIBA',
     },
