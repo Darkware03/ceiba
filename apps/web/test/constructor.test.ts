@@ -314,22 +314,28 @@ describe('almacén del constructor', () => {
     // Va por el MOTOR, que es el camino por defecto. El doble se inyecta con
     // `usarFetch` porque el adaptador de motor habla con nuestra API a traves
     // del cliente comun, no con el `fetchImpl` que solo honra el modo directo.
+    // SOBRE REAL DE LA API, EN ESPANOL. Este doble devolvia antes
+    // `{executionId, outcome, response, timings}` —un contrato que yo supuse y
+    // que la API nunca ha emitido—. Por eso la prueba pasaba en verde mientras
+    // el usuario veia «sin respuesta, 0 ms, codigo desconocido»: el doble
+    // mentia igual que el adaptador. Ahora replica lo que emite de verdad
+    // `studio-core.service.ts`.
     usarFetch(async () =>
       new Response(
         JSON.stringify({
-          executionId: 'exec-hist',
-          outcome: 'completed',
-          response: {
-            status: 200,
-            statusText: 'OK',
-            headers: [],
-            body: '{"ok":true}',
-            bodyTruncated: false,
-            sizeBytes: 11,
-          },
-          timings: { dnsMs: 0, tcpMs: 0, tlsMs: 0, ttfbMs: 5, totalMs: 12 },
-          redirects: [],
-          error: null,
+          historyId: 'exec-hist',
+          exito: true,
+          codigoEstado: 200,
+          textoEstado: 'OK',
+          cabeceras: [{ clave: 'content-type', valor: 'application/json' }],
+          cuerpoTexto: '{"ok":true}',
+          tipoContenido: 'application/json',
+          tamanoBytes: 11,
+          truncado: false,
+          tiempos: { totalMs: 12 },
+          urlFinal: 'https://api.ejemplo.com/v1/cosas',
+          redirecciones: 0,
+          desenlace: 'completed',
         }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       ),
@@ -377,14 +383,22 @@ describe('almacén del constructor', () => {
     const llamadas: string[] = [];
     usarFetch(async (entrada: RequestInfo | URL) => {
       llamadas.push(String(entrada));
+      // Sobre real de la API, en espanol (ver nota de la prueba anterior).
       return new Response(
         JSON.stringify({
-          executionId: 'exec-1',
-          outcome: 'completed',
-          response: { status: 200, statusText: 'OK', headers: [], body: '{}', bodyTruncated: false, sizeBytes: 2 },
-          timings: { dnsMs: 1, tcpMs: 2, tlsMs: 3, ttfbMs: 4, totalMs: 10 },
-          redirects: [],
-          error: null,
+          historyId: 'exec-1',
+          exito: true,
+          codigoEstado: 200,
+          textoEstado: 'OK',
+          cabeceras: [],
+          cuerpoTexto: '{}',
+          tipoContenido: 'application/json',
+          tamanoBytes: 2,
+          truncado: false,
+          tiempos: { totalMs: 10 },
+          urlFinal: 'https://api.ejemplo.com/v1/cosas',
+          redirecciones: 0,
+          desenlace: 'completed',
         }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       );

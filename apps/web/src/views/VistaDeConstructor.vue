@@ -196,7 +196,17 @@ async function enviar(): Promise<void> {
       </ul>
     </CeibaAviso>
 
-    <CeibaAviso tono="aviso" titulo="Ejecución provisional desde el navegador">
+    <!--
+      SOLO EN MODO DIRECTO. Antes se pintaba siempre, asi que al elegir «A
+      traves del motor de CEIBA» la pantalla seguia diciendo «Ejecucion
+      provisional desde el navegador». El cliente lo reporto textualmente y
+      tenia razon: la interfaz contradecia lo que estaba haciendo.
+    -->
+    <CeibaAviso
+      v-if="constructor.adaptador === 'navegador'"
+      tono="aviso"
+      titulo="Ejecución provisional desde el navegador"
+    >
       <p>{{ puerto.advertencia }}</p>
       <p v-if="!puerto.disponible" class="constructor__pendiente">
         Este modo todavía no funciona: al enviar verás el error explicando por qué.

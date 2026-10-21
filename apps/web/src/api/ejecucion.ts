@@ -731,15 +731,51 @@ export const adaptadorDeApi: PuertoDeEjecucion = {
         },
       );
 
+      // TRADUCCION DEL SOBRE REAL DE LA API, QUE VIENE EN ESPANOL.
+      //
+      // Este mapeo estaba mal y es la causa del fallo que reporto el cliente:
+      // «sin respuesta del destino, 0 ms, codigo desconocido» aunque el motor
+      // SI alcanzaba el destino. El adaptador leia `outcome`, `response` y
+      // `timings`, y la API devuelve `desenlace`, `codigoEstado`, `cabeceras`,
+      // `cuerpoTexto` y `tiempos`. Todo salia `undefined`, de ahi el 0 ms y el
+      // «desconocido». Se escribio contra un contrato supuesto en vez de contra
+      // la respuesta real.
+      const tot = Math.max(0, Number(respuesta.tiempos?.totalMs ?? 0));
+      const carga: CargaDeRespuesta | null = respuesta.exito
+        ? {
+            status: Number(respuesta.codigoEstado ?? 0),
+            statusText: String(respuesta.textoEstado ?? ''),
+            // El motor no lo expone todavia; se declara vacio en vez de inventarlo.
+            httpVersion: '',
+            headers: (respuesta.cabeceras ?? []).map((c) => ({
+              name: c.clave,
+              value: c.valor,
+            })),
+            bodyEncoding: 'utf8',
+            body: String(respuesta.cuerpoTexto ?? ''),
+            bodyTruncated: Boolean(respuesta.truncado),
+            sizeBytes: Number(respuesta.tamanoBytes ?? 0),
+          }
+        : null;
+
       const resultado: ResultadoDeEjecucion = {
-        executionId: respuesta.executionId ?? idEjecucion,
-        outcome: (respuesta.outcome ?? 'failed') as Desenlace,
-        response: respuesta.response ?? null,
-        timings: respuesta.timings ?? TIEMPOS_EN_CERO,
-        redirects: respuesta.redirects ?? [],
-        error: respuesta.error ?? null,
+        executionId: String(respuesta.historyId ?? idEjecucion),
+        outcome: (respuesta.desenlace ?? (respuesta.exito ? 'completed' : 'failed')) as Desenlace,
+        response: carga,
+        // La API sólo publica el total. El resto se deja en cero EXPLÍCITAMENTE
+        // en vez de repartirlo a ojo: un desglose inventado es peor que uno
+        // ausente.
+        timings: { dnsMs: 0, tcpMs: 0, tlsMs: 0, ttfbMs: 0, totalMs: tot },
+        // Sólo llega el recuento, no el detalle de cada salto.
+        redirects: [],
+        error: respuesta.exito
+          ? null
+          : {
+              code: (respuesta.errorCodigo ?? 'INVALID_REQUEST') as CodigoDeError,
+              message: String(respuesta.errorMensaje ?? 'La ejecución falló.'),
+            },
         adaptador: 'api',
-        urlEfectiva,
+        urlEfectiva: String(respuesta.urlFinal ?? urlEfectiva),
         // El motor no descarta ninguna: esa limitación era del navegador.
         cabecerasIgnoradas: [],
       };
@@ -766,14 +802,29 @@ export const adaptadorDeApi: PuertoDeEjecucion = {
   },
 };
 
-/** Forma que devuelve `POST /api/v1/requests/execute`. */
+/**
+ * Forma REAL que devuelve `POST /api/v1/requests/execute`.
+ *
+ * Está en español porque así la emite `studio-core.service.ts`. Se transcribe
+ * tal cual en vez de renombrarla aquí: inventar un alias inglés fue justo el
+ * error que dejó la ejecución por motor devolviendo 0 ms y «desconocido».
+ */
 interface RespuestaDeEjecucionApi {
-  readonly executionId?: string;
-  readonly outcome?: string;
-  readonly response?: CargaDeRespuesta | null;
-  readonly timings?: TiemposDeEjecucion;
-  readonly redirects?: readonly SaltoDeRedireccion[];
-  readonly error?: ErrorDeEjecucion | null;
+  readonly historyId?: string;
+  readonly exito?: boolean;
+  readonly codigoEstado?: number;
+  readonly textoEstado?: string;
+  readonly cabeceras?: readonly { readonly clave: string; readonly valor: string }[];
+  readonly cuerpoTexto?: string;
+  readonly tipoContenido?: string;
+  readonly tamanoBytes?: number;
+  readonly truncado?: boolean;
+  readonly tiempos?: { readonly totalMs?: number };
+  readonly urlFinal?: string;
+  readonly redirecciones?: number;
+  readonly desenlace?: string;
+  readonly errorCodigo?: string;
+  readonly errorMensaje?: string;
 }
 
 function mensajeLegible(e: unknown): string {
