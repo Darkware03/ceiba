@@ -12,6 +12,7 @@ import {
   tamanoEnBytes,
   textoDeEstado,
 } from '../src/api/ejecucion';
+import { usarFetch } from '../src/api/cliente';
 import type { Par, SolicitudPreparada } from '../src/api/ejecucion';
 import { MAXIMO_DE_HISTORIAL, usarAlmacenDeConstructor } from '../src/stores/constructor';
 import {
@@ -310,21 +311,43 @@ describe('almacén del constructor', () => {
     const almacen = usarAlmacenDeConstructor();
     almacen.url = 'https://api.ejemplo.com/v1/cosas';
 
-    const registro: LlamadaRegistrada[] = [];
-    const fetchDoble = fetchQueDevuelve(
-      () => new Response('{"ok":true}', { status: 200, statusText: 'OK' }),
-      registro,
+    // Va por el MOTOR, que es el camino por defecto. El doble se inyecta con
+    // `usarFetch` porque el adaptador de motor habla con nuestra API a traves
+    // del cliente comun, no con el `fetchImpl` que solo honra el modo directo.
+    usarFetch(async () =>
+      new Response(
+        JSON.stringify({
+          executionId: 'exec-hist',
+          outcome: 'completed',
+          response: {
+            status: 200,
+            statusText: 'OK',
+            headers: [],
+            body: '{"ok":true}',
+            bodyTruncated: false,
+            sizeBytes: 11,
+          },
+          timings: { dnsMs: 0, tcpMs: 0, tlsMs: 0, ttfbMs: 5, totalMs: 12 },
+          redirects: [],
+          error: null,
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
     );
 
-    const resultado = await almacen.ejecutarSolicitud({ fetchImpl: fetchDoble });
+    const resultado = await almacen.ejecutarSolicitud();
 
     expect(resultado?.outcome).toBe('completed');
+    expect(resultado?.adaptador).toBe('api');
     expect(almacen.ejecutando).toBe(false);
     expect(almacen.error).toBeNull();
     expect(almacen.resultado?.response?.status).toBe(200);
     expect(almacen.historial).toHaveLength(1);
     expect(almacen.historial[0]?.estado).toBe(200);
+    // El historial guarda el DESTINO, no la ruta interna de la API.
     expect(almacen.historial[0]?.url).toBe('https://api.ejemplo.com/v1/cosas');
+
+    usarFetch(null);
   });
 
   it('se niega a enviar sin URL y lo dice en `error`', async () => {
@@ -336,17 +359,56 @@ describe('almacén del constructor', () => {
     expect(almacen.historial).toHaveLength(0);
   });
 
-  it('el adaptador de API falla con un mensaje claro: el endpoint no existe', async () => {
+  it('el adaptador por defecto es el MOTOR, no el navegador', () => {
+    const almacen = usarAlmacenDeConstructor();
+    // Esta es la garantia que pidio el cliente: nada sale de la pestana.
+    expect(almacen.adaptador).toBe('api');
+    expect(almacen.puerto.id).toBe('api');
+    expect(almacen.puerto.disponible).toBe(true);
+  });
+
+  it('el adaptador de motor envia a la API y NO usa fetch del navegador', async () => {
     const almacen = usarAlmacenDeConstructor();
     almacen.url = 'https://api.ejemplo.com/v1/cosas';
-    almacen.usarAdaptador('api');
+    almacen.anadirCabecera('Host', 'otro.ejemplo.com');
+
+    // Si la peticion saliera del navegador, este doble recibiria el destino.
+    // Debe recibir la ruta de NUESTRA API, y nada mas.
+    const llamadas: string[] = [];
+    usarFetch(async (entrada: RequestInfo | URL) => {
+      llamadas.push(String(entrada));
+      return new Response(
+        JSON.stringify({
+          executionId: 'exec-1',
+          outcome: 'completed',
+          response: { status: 200, statusText: 'OK', headers: [], body: '{}', bodyTruncated: false, sizeBytes: 2 },
+          timings: { dnsMs: 1, tcpMs: 2, tlsMs: 3, ttfbMs: 4, totalMs: 10 },
+          redirects: [],
+          error: null,
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    });
 
     const resultado = await almacen.ejecutarSolicitud();
 
-    expect(resultado?.outcome).toBe('failed');
-    expect(resultado?.response).toBeNull();
-    expect(resultado?.error?.message).toContain('/api/v1/requests/execute');
-    expect(resultado?.error?.message).toContain('no existe');
+    expect(resultado?.adaptador).toBe('api');
+    expect(resultado?.outcome).toBe('completed');
+    // Tiempos REALES del motor: el navegador los devolvia en cero.
+    expect(resultado?.timings.totalMs).toBe(10);
+    // Ninguna llamada al destino; todas a la API de CEIBA.
+    expect(llamadas.some((u) => u.includes('api.ejemplo.com'))).toBe(false);
+    expect(llamadas.some((u) => u.includes('/requests/execute'))).toBe(true);
+
+    usarFetch(null);
+  });
+
+  it('por el motor NO se descarta ninguna cabecera: `Host` llega', async () => {
+    const almacen = usarAlmacenDeConstructor();
+    almacen.anadirCabecera('Host', 'otro.ejemplo.com');
+    // La limitacion de cabeceras prohibidas era del navegador. El motor no la
+    // tiene, asi que la lista de ignoradas queda vacia.
+    expect(almacen.cabecerasIgnoradas).toEqual([]);
   });
 
   it('el historial se queda en las últimas 20 ejecuciones y no se persiste', async () => {
@@ -394,10 +456,18 @@ describe('VistaDeConstructor', () => {
     const almacen = usarAlmacenDeConstructor();
 
     expect(envoltorio.text()).toContain('Constructor de solicitudes');
-    // §18: la limitación tiene que estar dicha, no escondida en un comentario.
+    // Por defecto se va por el MOTOR, asi que no hay limitacion que avisar.
+    expect(envoltorio.text()).toContain('A través del motor de CEIBA');
+    expect(envoltorio.get('button[type="submit"]').attributes('disabled')).toBeDefined();
+
+    // La limitacion solo aparece si el usuario baja al modo directo a mano, y
+    // entonces tiene que estar DICHA, no escondida en un comentario (§18).
+    almacen.usarAdaptador('navegador');
+    await envoltorio.vm.$nextTick();
     expect(envoltorio.text()).toContain('CORS');
     expect(envoltorio.text()).toContain('controles SSRF del motor');
-    expect(envoltorio.get('button[type="submit"]').attributes('disabled')).toBeDefined();
+    almacen.usarAdaptador('api');
+    await envoltorio.vm.$nextTick();
 
     almacen.url = 'https://api.ejemplo.com/v1/cosas';
     almacen.anadirParametro('page', '2');
@@ -409,26 +479,28 @@ describe('VistaDeConstructor', () => {
     envoltorio.unmount();
   });
 
-  it('avisa de que el modo «a través de la API» todavía no funciona', async () => {
+  it('la pantalla ofrece el motor como modo activo', async () => {
     const envoltorio = mount(VistaDeConstructor);
     const almacen = usarAlmacenDeConstructor();
 
-    almacen.usarAdaptador('api');
-    await envoltorio.vm.$nextTick();
-
-    expect(envoltorio.text()).toContain('/api/v1/requests/execute');
-    expect(envoltorio.text()).toContain('todavía no funciona');
+    expect(almacen.adaptador).toBe('api');
+    expect(envoltorio.text()).toContain('A través del motor de CEIBA');
 
     envoltorio.unmount();
   });
 
-  it('marca las cabeceras que el navegador descartará', async () => {
+  it('solo el modo directo, elegido a mano, avisa de las cabeceras descartadas', async () => {
     const envoltorio = mount(VistaDeConstructor);
     const almacen = usarAlmacenDeConstructor();
 
     almacen.anadirCabecera('Host', 'otro.ejemplo.com');
     await envoltorio.vm.$nextTick();
+    // Por defecto (motor) no hay nada que descartar.
+    expect(almacen.cabecerasIgnoradas).toEqual([]);
 
+    // Al bajar al modo directo reaparece la limitacion del navegador.
+    almacen.usarAdaptador('navegador');
+    await envoltorio.vm.$nextTick();
     expect(almacen.cabecerasIgnoradas).toEqual(['Host']);
     expect(envoltorio.text()).toContain('El navegador descartará estas cabeceras');
 

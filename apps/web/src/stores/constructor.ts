@@ -113,11 +113,16 @@ export const usarAlmacenDeConstructor = defineStore(ID_DEL_ALMACEN, {
     parametros: [nuevoPar()],
     cuerpo: cuerpoInicial(),
     // `navegador`, no `motor`: los adaptadores que existen son
-    // `'navegador' | 'api'` (`api/ejecucion.ts:392`). `'motor'` no es ninguno,
+    // `'navegador' | 'api'` (`api/ejecucion.ts`). `'motor'` no es ninguno,
     // así que el almacén arrancaba en un adaptador inexistente y
     // `cabecerasIgnoradas` dejaba de avisar de las cabeceras que el navegador
     // descarta —justo el aviso que exige la prueba del constructor—.
-    adaptador: 'navegador',
+    // CAMBIADO A `api`: TODO sale por el motor, no por el navegador.
+    // El modo directo se saltaba los 12 controles SSRF, descartaba las
+    // cabeceras prohibidas del navegador (`Host`, `Origin`, `Referer`,
+    // `Cookie`...) y devolvia tiempos y redirecciones en cero porque la
+    // pestana no los expone. Se conserva solo como diagnostico, a mano.
+    adaptador: 'api',
     ejecutando: false,
     resultado: null,
     error: null,

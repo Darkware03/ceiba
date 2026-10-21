@@ -41,6 +41,7 @@
  * `packages/contracts`, esto debe importarse de allí y borrarse de aquí.
  */
 import type { FuncionFetch } from './cliente';
+import { BASE_API, peticionApi } from './cliente';
 
 // ---------------------------------------------------------------------------
 // Vocabulario del contrato del motor
@@ -73,6 +74,15 @@ export const CODIGOS_DE_ERROR = [
   'SCRIPT_TIMEOUT',
   'INVALID_REQUEST',
   'ENGINE_OVERLOADED',
+  /**
+   * ORIGEN CLIENTE, no del motor. El motor NUNCA emite este codigo.
+   *
+   * Significa que la interfaz no pudo siquiera hablar con la API de CEIBA
+   * (API caida, sesion perdida, red del navegador). Tiene codigo propio a
+   * proposito: reutilizar `CONNECTION_REFUSED` diria que el destino rechazo
+   * la conexion, y mandaria a depurar el sitio equivocado.
+   */
+  'API_INALCANZABLE',
 ] as const;
 
 export type CodigoDeError = (typeof CODIGOS_DE_ERROR)[number];
@@ -99,6 +109,10 @@ export const MENSAJES_DE_ERROR: Readonly<Record<CodigoDeError, string>> = Object
   SCRIPT_TIMEOUT: 'El script agotó su tiempo máximo.',
   INVALID_REQUEST: 'La petición no cumple el contrato del motor.',
   ENGINE_OVERLOADED: 'El motor está saturado; inténtalo de nuevo.',
+  // Unico de origen cliente: el fallo es con la API de CEIBA, no con el
+  // destino. La redaccion lo deja claro para no mandar a depurar el sitio
+  // equivocado.
+  API_INALCANZABLE: 'No se pudo contactar con la API de CEIBA; la solicitud no llegó a salir.',
 });
 
 // ---------------------------------------------------------------------------
@@ -398,6 +412,10 @@ export interface OpcionesDeEjecucion {
   /** Reloj inyectable, para que las pruebas no dependan de la máquina. */
   readonly ahora?: () => number;
   readonly idDeEjecucion?: string;
+  /** Contexto que necesita el motor; lo ignora el adaptador del navegador. */
+  readonly workspaceId?: string | null;
+  readonly requestId?: string | null;
+  readonly environmentId?: string | null;
 }
 
 export interface PuertoDeEjecucion {
@@ -652,52 +670,127 @@ export const adaptadorDirectoDelNavegador: PuertoDeEjecucion = {
 export const RUTA_DE_EJECUCION_EN_API = '/api/v1/requests/execute';
 
 /**
- * HUECO: `POST /api/v1/requests/execute` no existe — creo que pertenece a
- * `backend-engineer` (módulo nuevo en `apps/api/src/modules/`) junto con el
- * cliente del motor; `apps/api/src/modules/` sólo tiene hoy `identity`,
- * `workspace` y `collection`.
+ * ESTE ES EL CAMINO BUENO, Y YA EXISTE.
  *
- * Este adaptador es la forma del día que exista: la API recibe la solicitud,
- * la valida contra `executeRequestSchema`, llama al motor con
- * `CEIBA_ENGINE_TOKEN` (que nunca toca el navegador) y devuelve un
- * `ExecuteResponse`. Hasta entonces **falla a propósito y en voz alta**: un
- * adaptador que devolviera datos falsos haría creer que la función está hecha.
+ * La API recibe la solicitud, resuelve las variables del entorno, llama al
+ * motor con `CEIBA_ENGINE_TOKEN` —que **nunca toca el navegador**— y devuelve
+ * el resultado. Por el camino la petición pasa por los **12 controles SSRF**
+ * del motor, que es justo lo que el modo directo se saltaba.
  *
- * Por eso tampoco es el adaptador por defecto.
+ * Rutas reales del controlador (`studio.controller.ts`):
+ *   `POST /api/v1/workspaces/:workspaceId/execute`
+ *   `POST /api/v1/requests/execute`  ← la que usamos: acepta `workspaceId` en
+ *   el cuerpo y, si no va, lo deduce del primer workspace del usuario.
+ *
+ * Diferencias reales frente al modo directo, y son a favor:
+ *   - **Se envían TODAS las cabeceras.** El navegador descartaba `Host`,
+ *     `Origin`, `Referer`, `Cookie` y el resto de *forbidden header names*;
+ *     aquí las pone el motor, que no tiene esa restricción.
+ *   - **Hay tiempos y redirecciones de verdad.** El navegador no los expone y
+ *     se devolvían en cero; el motor los mide.
+ *   - **No hay CORS.** La petición sale del servidor, no de la pestaña.
  */
 export const adaptadorDeApi: PuertoDeEjecucion = {
   id: 'api',
-  etiqueta: 'A través de la API de CEIBA (pendiente)',
-  disponible: false,
-  advertencia: `El endpoint ${RUTA_DE_EJECUCION_EN_API} todavía no existe en la API.`,
-  ejecutar(solicitud, opciones = {}) {
+  etiqueta: 'A través del motor de CEIBA',
+  disponible: true,
+  advertencia: '',
+  async ejecutar(solicitud, opciones = {}) {
     const urlEfectiva = construirUrl(solicitud.url, solicitud.parametros);
-    return Promise.resolve({
-      executionId: opciones.idDeEjecucion ?? nuevoIdDeEjecucion(),
-      outcome: 'failed' as const,
-      response: null,
-      timings: TIEMPOS_EN_CERO,
-      redirects: [],
-      error: {
-        code: 'INVALID_REQUEST' as const,
-        message:
-          `La ejecución a través de la API todavía no está disponible: el endpoint ` +
-          `POST ${RUTA_DE_EJECUCION_EN_API} no existe en esta versión. ` +
-          `Usa el modo directo del navegador mientras tanto.`,
-      },
-      adaptador: 'api' as const,
-      urlEfectiva,
-      cabecerasIgnoradas: [],
-    });
+    const idEjecucion = opciones.idDeEjecucion ?? nuevoIdDeEjecucion();
+
+    // El contrato del controlador usa `key`/`value`/`enabled`. Se mandan los
+    // pares TAL CUAL, sin filtrar los prohibidos del navegador: el motor sí
+    // puede ponerlos, y filtrarlos aquí sería arrastrar una limitación que ya
+    // no aplica.
+    const aPares = (pares: readonly Par[]) =>
+      pares
+        .filter((p) => p.nombre.trim() !== '')
+        .map((p) => ({ key: p.nombre, value: p.valor, enabled: p.activo }));
+
+    const cuerpoEnviado =
+      solicitud.cuerpo.modo === 'none' ? null : (solicitud.cuerpo.contenido ?? null);
+
+    try {
+      const respuesta = await peticionApi<RespuestaDeEjecucionApi>(
+        RUTA_DE_EJECUCION_EN_API.replace(BASE_API, ''),
+        {
+          metodo: 'POST',
+          cuerpo: {
+            workspaceId: opciones.workspaceId ?? undefined,
+            requestId: opciones.requestId ?? null,
+            environmentId: opciones.environmentId ?? null,
+            method: solicitud.metodo,
+            url: solicitud.url,
+            headers: aPares(solicitud.cabeceras),
+            queryParams: aPares(solicitud.parametros),
+            bodyType: solicitud.cuerpo.modo,
+            body: cuerpoEnviado,
+          },
+          senal: opciones.senal,
+        },
+      );
+
+      const resultado: ResultadoDeEjecucion = {
+        executionId: respuesta.executionId ?? idEjecucion,
+        outcome: (respuesta.outcome ?? 'failed') as Desenlace,
+        response: respuesta.response ?? null,
+        timings: respuesta.timings ?? TIEMPOS_EN_CERO,
+        redirects: respuesta.redirects ?? [],
+        error: respuesta.error ?? null,
+        adaptador: 'api',
+        urlEfectiva,
+        // El motor no descarta ninguna: esa limitación era del navegador.
+        cabecerasIgnoradas: [],
+      };
+      return resultado;
+    } catch (e) {
+      // Un fallo de transporte contra NUESTRA API no es un fallo del destino.
+      // Se distingue, porque confundirlos manda a depurar al sitio equivocado.
+      const fallo: ResultadoDeEjecucion = {
+        executionId: idEjecucion,
+        outcome: 'failed',
+        response: null,
+        timings: TIEMPOS_EN_CERO,
+        redirects: [],
+        error: {
+          code: 'API_INALCANZABLE',
+          message: `No se pudo hablar con la API de CEIBA: ${mensajeLegible(e)}`,
+        },
+        adaptador: 'api',
+        urlEfectiva,
+        cabecerasIgnoradas: [],
+      };
+      return fallo;
+    }
   },
 };
 
-/** Adaptadores conocidos. El directo va primero porque es el que funciona. */
+/** Forma que devuelve `POST /api/v1/requests/execute`. */
+interface RespuestaDeEjecucionApi {
+  readonly executionId?: string;
+  readonly outcome?: string;
+  readonly response?: CargaDeRespuesta | null;
+  readonly timings?: TiemposDeEjecucion;
+  readonly redirects?: readonly SaltoDeRedireccion[];
+  readonly error?: ErrorDeEjecucion | null;
+}
+
+function mensajeLegible(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  return String(e);
+}
+
+/**
+ * Adaptadores conocidos. **El del motor va primero y es el predeterminado.**
+ * El directo del navegador se conserva sólo como diagnóstico: no pasa por los
+ * controles SSRF, descarta cabeceras y no mide tiempos.
+ */
 export const ADAPTADORES: readonly PuertoDeEjecucion[] = Object.freeze([
-  adaptadorDirectoDelNavegador,
   adaptadorDeApi,
+  adaptadorDirectoDelNavegador,
 ]);
 
 export function adaptadorPorId(id: IdDeAdaptador): PuertoDeEjecucion {
-  return id === 'api' ? adaptadorDeApi : adaptadorDirectoDelNavegador;
+  return id === 'navegador' ? adaptadorDirectoDelNavegador : adaptadorDeApi;
 }
