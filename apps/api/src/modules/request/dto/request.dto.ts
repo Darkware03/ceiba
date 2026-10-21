@@ -27,17 +27,18 @@ export const METODOS_HTTP = [
 export type MetodoHttp = (typeof METODOS_HTTP)[number];
 
 /**
- * `body_mode` del esquema. El enum de PostgreSQL tiene dos valores más
- * (`binary_file` y `custom`) que **no se aceptan por esta ruta**:
+ * `body_mode` del esquema. **Los 10 valores**, contados sobre
+ * `prisma/schema/01-enums.prisma:117-130` (no copiados de ningún documento:
+ * el BRIEF-FASE6 decía 8 y se equivocó).
  *
- *  - `binary_file` exige una fila en `files` (`ck_body_mode_shape` obliga a
- *    `binary_file_id IS NOT NULL`), y no hay subida de ficheros en la API.
- *  - `custom` no tiene forma definida.
+ * FASE 7 — se admiten `binary_file` y `custom`, que la fase 6 rechazaba:
  *
- * Aceptarlos produciría una violación de CHECK en el motor o una fila
- * inconsistente. Se rechazan con 422 y se declaran como HUECO en el informe.
- * Las filas que ya existan con esos modos **sí** se leen y se exportan a cURL
- * con su advertencia; lo que no se permite es crearlas desde aquí.
+ *  - `binary_file` ya es posible porque **ahora hay subida de ficheros**
+ *    (§2.2): el cliente manda `binaryFileId` y `ck_body_mode_shape` queda
+ *    satisfecho. Sin `binaryFileId` sigue siendo **422**, no un 500 del CHECK.
+ *  - `custom` se acepta con la forma que el CHECK le impone: `raw_content` y
+ *    `binary_file_id` a NULL. Es un modo «sin forma definida» en el esquema y
+ *    así se guarda; el generador de cURL ya lo exporta con su advertencia.
  */
 export const MODOS_DE_CUERPO = [
   'none',
@@ -48,6 +49,8 @@ export const MODOS_DE_CUERPO = [
   'graphql',
   'form_urlencoded',
   'multipart_form_data',
+  'binary_file',
+  'custom',
 ] as const;
 export type ModoDeCuerpo = (typeof MODOS_DE_CUERPO)[number];
 
@@ -66,6 +69,21 @@ export const MODOS_DE_FORMULARIO: ReadonlySet<string> = new Set([
   'multipart_form_data',
 ]);
 
+/**
+ * Modos que `ck_body_mode_shape` obliga a dejar con `raw_content IS NULL` **y**
+ * `binary_file_id IS NULL`. Literal de la migración
+ * `20261014193100_ceiba_constraints_and_indexes/migration.sql:255-256`.
+ */
+export const MODOS_SIN_CONTENIDO_CRUDO: ReadonlySet<string> = new Set([
+  'none',
+  'form_urlencoded',
+  'multipart_form_data',
+  'custom',
+]);
+
+/** Sólo `multipart_form_data` admite campos de tipo fichero (columna `file_id`). */
+export const MODOS_CON_ADJUNTOS: ReadonlySet<string> = new Set(['multipart_form_data']);
+
 /** Token de RFC 9110. Vale igual para nombres de cabecera y para verbos. */
 const TOKEN_RFC9110 = /^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/u;
 
@@ -81,6 +99,52 @@ const esquemaCabecera = esquemaParejaClaveValor.refine(
   (h) => TOKEN_RFC9110.test(h.key),
   { message: 'el nombre de cabecera debe ser un token de RFC 9110' },
 );
+
+/**
+ * Un campo de `request_body_fields` tal y como lo manda el cliente (§2.1).
+ *
+ * `ck_bodyfield_xor` permite **como mucho una** fuente de valor por fila, así
+ * que `kind` decide cuál: `text` → `field_value`, `file` → `file_id`. Nunca
+ * los dos. Los campos secretos **no se crean por esta ruta**: exigen
+ * `secret_id`, y el cliente no tiene forma de referenciar un secreto todavía.
+ */
+export const esquemaCampoDeCuerpo = z
+  .object({
+    key: z.string().trim().min(1).max(256),
+    kind: z.enum(['text', 'file']).optional(),
+    value: z.string().max(16384).nullable().optional(),
+    fileId: z.uuid().nullable().optional(),
+    contentType: z.string().trim().max(255).nullable().optional(),
+    enabled: z.boolean().optional(),
+  })
+  .superRefine((campo, ctx) => {
+    const tipo = campo.kind ?? (campo.fileId != null ? 'file' : 'text');
+    if (tipo === 'file') {
+      if (campo.fileId == null) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['fileId'],
+          message: 'un campo de tipo file exige fileId',
+        });
+      }
+      if (campo.value != null && campo.value !== '') {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['value'],
+          message: 'un campo de tipo file no puede llevar value (ck_bodyfield_xor)',
+        });
+      }
+      return;
+    }
+    if (campo.fileId != null) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['fileId'],
+        message: 'un campo de tipo text no puede llevar fileId (ck_bodyfield_xor)',
+      });
+    }
+  });
+export type CampoDeCuerpo = z.infer<typeof esquemaCampoDeCuerpo>;
 
 const camposComunes = {
   name: z.string().trim().min(1).max(200),
@@ -100,8 +164,75 @@ const camposComunes = {
   queryParams: z.array(esquemaParejaClaveValor).max(200).optional(),
   bodyType: z.enum(MODOS_DE_CUERPO).optional(),
   body: z.string().max(1_048_576).nullable().optional(),
+  bodyContentType: z.string().trim().max(255).nullable().optional(),
+  bodyFields: z.array(esquemaCampoDeCuerpo).max(200).optional(),
+  binaryFileId: z.uuid().nullable().optional(),
   sortKey: z.string().trim().max(64).nullable().optional(),
 };
+
+/**
+ * `ck_body_mode_shape` traducido a 422 legible.
+ *
+ * Se comprueba **aquí** y no se deja reventar al CHECK porque un 500 con un
+ * «violates check constraint» no le dice nada al cliente y, peor, expone el
+ * nombre de la restricción. El §2.1 del BRIEF-FASE7 es explícito: «Enviar
+ * `body` con `bodyType` de formulario es **422**, no un silencio».
+ *
+ * `modo === undefined` significa «el PATCH no toca el modo»: la coherencia
+ * contra el estado final la comprueba el servicio, que sí conoce la fila.
+ */
+export function problemasDeFormaDelCuerpo(v: {
+  bodyType?: string | undefined;
+  body?: string | null | undefined;
+  bodyFields?: readonly unknown[] | undefined;
+  binaryFileId?: string | null | undefined;
+}): string[] {
+  const modo = v.bodyType;
+  if (modo === undefined) return [];
+  const problemas: string[] = [];
+  const traeCrudo = typeof v.body === 'string' && v.body !== '';
+  const traeCampos = v.bodyFields !== undefined && v.bodyFields.length > 0;
+  const traeBinario = typeof v.binaryFileId === 'string';
+
+  if (modo === 'binary_file') {
+    if (!traeBinario) {
+      problemas.push('binaryFileId: obligatorio con bodyType=binary_file (ck_body_mode_shape)');
+    }
+    if (traeCrudo) {
+      problemas.push('body: con bodyType=binary_file el contenido crudo debe ir vacío');
+    }
+    if (traeCampos) {
+      problemas.push('bodyFields: sólo valen en form_urlencoded y multipart_form_data');
+    }
+    return problemas;
+  }
+
+  if (traeBinario) {
+    problemas.push(`binaryFileId: sólo vale con bodyType=binary_file, no con ${modo}`);
+  }
+
+  if (MODOS_DE_FORMULARIO.has(modo)) {
+    if (traeCrudo) {
+      problemas.push(
+        `body: con bodyType=${modo} el contenido va en bodyFields, no en body (ck_body_mode_shape)`,
+      );
+    }
+    return problemas;
+  }
+
+  if (traeCampos) {
+    problemas.push('bodyFields: sólo valen en form_urlencoded y multipart_form_data');
+  }
+  if (modo === 'none' && traeCrudo) {
+    problemas.push('body: con bodyType=none no puede haber contenido');
+  }
+  if (modo === 'custom' && traeCrudo) {
+    problemas.push('body: con bodyType=custom el esquema obliga a raw_content NULL');
+  }
+  return problemas;
+}
+
+const MENSAJE_FORMA = 'la forma del cuerpo no es compatible con el modo indicado';
 
 /**
  * `ck_request_custom_verb`: `(method = 'CUSTOM') = (method_custom IS NOT NULL)`.
@@ -131,6 +262,11 @@ export const esquemaCrearPeticion = z
   .refine((v) => verboCoherente({ method: v.method ?? 'GET', methodCustom: v.methodCustom }), {
     message: MENSAJE_VERBO,
     path: ['methodCustom'],
+  })
+  .superRefine((v, ctx) => {
+    for (const problema of problemasDeFormaDelCuerpo(v)) {
+      ctx.addIssue({ code: 'custom', path: ['bodyType'], message: `${MENSAJE_FORMA}: ${problema}` });
+    }
   });
 export type EntradaCrearPeticion = z.infer<typeof esquemaCrearPeticion>;
 
@@ -146,10 +282,18 @@ export const esquemaActualizarPeticion = z
     queryParams: camposComunes.queryParams,
     bodyType: camposComunes.bodyType,
     body: camposComunes.body,
+    bodyContentType: camposComunes.bodyContentType,
+    bodyFields: camposComunes.bodyFields,
+    binaryFileId: camposComunes.binaryFileId,
     sortKey: camposComunes.sortKey,
   })
   .refine((v) => Object.keys(v).length > 0, { message: 'no hay nada que actualizar' })
-  .refine((v) => verboCoherente(v), { message: MENSAJE_VERBO, path: ['methodCustom'] });
+  .refine((v) => verboCoherente(v), { message: MENSAJE_VERBO, path: ['methodCustom'] })
+  .superRefine((v, ctx) => {
+    for (const problema of problemasDeFormaDelCuerpo(v)) {
+      ctx.addIssue({ code: 'custom', path: ['bodyType'], message: `${MENSAJE_FORMA}: ${problema}` });
+    }
+  });
 export type EntradaActualizarPeticion = z.infer<typeof esquemaActualizarPeticion>;
 
 export const esquemaDuplicarPeticion = z

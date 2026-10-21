@@ -193,6 +193,26 @@ export class StudioController {
     return this.collaboration.aceptarInvitacion(token, principal);
   }
 
+  /**
+   * **P6 §2.3 — variables disponibles para autocompletar `{{…}}`.**
+   *
+   * Autorizacion por el workspace de la coleccion: un ajeno recibe 403 (es
+   * miembro de nada) o 404 (la coleccion no existe), **nunca 200 con `items`
+   * vacio**. La diferencia importa: un 200 vacio le diria a un desconocido que
+   * el identificador que ha probado es real.
+   *
+   * Devuelve `{ items }` y nada mas. No hay paginacion a proposito: es una
+   * lista de autocompletado, se consume entera y de una vez.
+   */
+  @Get('collections/:collectionId/variables')
+  @RutaAutenticadaSinRecurso()
+  async listCollectionVariables(
+    @Param('collectionId') collectionId: string,
+    @PrincipalActual() principal: PrincipalUsuario,
+  ) {
+    return this.studio.listarVariablesDeColeccion(collectionId, principal);
+  }
+
   @Get('workspaces/:workspaceId/environments')
   @RutaAutenticadaSinRecurso()
   async listEnvironments(
@@ -215,6 +235,8 @@ export class StudioController {
       description?: string | null;
       color?: string | null;
       isDefault?: boolean;
+      /** ADITIVO (fase 7): ausente o null = entorno del workspace, como siempre. */
+      collectionId?: string | null;
       variables?: VariableEntornoInput[];
     },
   ) {
@@ -225,6 +247,7 @@ export class StudioController {
         description: body?.description,
         color: body?.color,
         isDefault: body?.isDefault,
+        collectionId: body?.collectionId ?? null,
         variables: body?.variables,
       },
       principal,

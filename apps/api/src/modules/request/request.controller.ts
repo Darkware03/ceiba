@@ -9,7 +9,7 @@ import {
   esquemaCrearPeticion,
   esquemaDuplicarPeticion,
 } from './dto/request.dto.ts';
-import { ServicioDePeticiones, vistaDetalle } from './request.service.ts';
+import { ServicioDePeticiones } from './request.service.ts';
 
 /**
  * Las 7 rutas del `BRIEF-FASE6` §1, en dos controladores por el mismo motivo
@@ -38,7 +38,9 @@ export class ControladorDePeticionesDeColeccion {
   @Get()
   @RequiereRolDeWorkspace('viewer')
   @Recurso({ tipo: 'collection', parametro: 'collectionId' })
-  async listar(@Param('collectionId') collectionId: string): Promise<Record<string, unknown>> {
+  async listar(
+    @Param('collectionId') collectionId: string,
+  ): Promise<Record<string, unknown>> {
     const { peticiones, carpetas } = await this.servicio.listar(collectionId);
     return {
       collectionId,
@@ -67,7 +69,7 @@ export class ControladorDePeticionesDeColeccion {
       principal.usuarioId,
       ipDe(peticion),
     );
-    return respuesta(fila);
+    return respuesta(await this.servicio.detalle(fila));
   }
 }
 
@@ -80,7 +82,7 @@ export class ControladorDePeticiones {
   @RequiereRolDeWorkspace('viewer')
   @Recurso({ tipo: 'request', parametro: 'requestId' })
   async obtener(@Param('requestId') requestId: string): Promise<Record<string, unknown>> {
-    return respuesta(await this.servicio.obtener(requestId));
+    return respuesta(await this.servicio.detalle(await this.servicio.obtener(requestId)));
   }
 
   /** 7 · `GET /requests/:requestId/curl` — antes del `:requestId` genérico no
@@ -123,7 +125,7 @@ export class ControladorDePeticiones {
       principal.usuarioId,
       ipDe(peticion),
     );
-    return respuesta(fila);
+    return respuesta(await this.servicio.detalle(fila));
   }
 
   /** 5 · `DELETE /requests/:requestId` — borrado **lógico**. */
@@ -156,13 +158,12 @@ export class ControladorDePeticiones {
       principal.usuarioId,
       ipDe(peticion),
     );
-    return respuesta(fila);
+    return respuesta(await this.servicio.detalle(fila));
   }
 }
 
 /** Envoltorio único de respuesta, con alias castellano/inglés del mismo objeto. */
-function respuesta(fila: Parameters<typeof vistaDetalle>[0]): Record<string, unknown> {
-  const vista = vistaDetalle(fila);
+function respuesta(vista: Record<string, unknown>): Record<string, unknown> {
   return { request: vista, peticion: vista };
 }
 

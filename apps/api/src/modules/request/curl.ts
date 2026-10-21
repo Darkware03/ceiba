@@ -84,6 +84,12 @@ export interface CampoDeFormularioParaCurl {
   readonly esSecreto: boolean;
   readonly habilitado: boolean;
   readonly esFichero: boolean;
+  /**
+   * Nombre original del adjunto (`files.original_filename`). Es lo único que
+   * permite emitir un `--form 'campo=@fichero.pdf'` con una ruta que el
+   * usuario reconozca. `null` si no se conoce.
+   */
+  readonly nombreDelFichero?: string | null | undefined;
   readonly contentType: string | null;
 }
 
@@ -100,6 +106,7 @@ export interface PeticionParaCurl {
   readonly variablesGraphql: unknown;
   readonly camposDeFormulario: readonly CampoDeFormularioParaCurl[];
   readonly tieneFicheroBinario: boolean;
+  readonly nombreDelFicheroBinario?: string | null | undefined;
   readonly timeoutMs: number | null;
   readonly politicaDeRedireccion: string | null;
   readonly maxRedirecciones: number | null;
@@ -581,11 +588,21 @@ function construirCuerpo(
         if (!campo.habilitado) continue;
         const nombre = campo.nombre.trim();
         if (nombre === '') continue;
+
+        // DEFECTO CORREGIDO EN LA FASE 7. `--data-urlencode` tiene CINCO
+        // sintaxis, y `name@filename` gana sobre `name=content`: un campo
+        // llamado `correo@dominio` hacía que cURL **leyera un fichero local**
+        // en lugar de enviar el valor. Las comillas de la shell no protegen,
+        // porque quien interpreta el `@` es cURL. Cuando el nombre lleva `@`
+        // se codifica aquí y se emite por `--data-raw`, que cURL concatena con
+        // `&` igual que los demás datos.
+        const nombreAmbiguo = nombre.includes('@');
+
         if (campo.esSecreto) {
           const marcador = nombreDeMarcador(`form_${nombre}`);
           partes.push(
             '--data-urlencode',
-            entrecomillarConMarcador(`${nombre}=$${marcador}`),
+            entrecomillarConMarcador(`${nombreAmbiguo ? codificarValor(nombre) : nombre}=$${marcador}`),
           );
           advertencias.push(
             `El campo «${nombre}» del formulario está marcado como secreto: el comando lleva el marcador \`$${marcador}\`, nunca el valor.`,
@@ -595,6 +612,13 @@ function construirCuerpo(
         if (campo.esFichero) {
           advertencias.push(
             `El campo «${nombre}» es un fichero y el modo del cuerpo es \`form_urlencoded\`, que no admite adjuntos. Se ha omitido.`,
+          );
+          continue;
+        }
+        if (nombreAmbiguo) {
+          partes.push(
+            '--data-raw',
+            entrecomillar(`${codificarValor(nombre)}=${codificarValor(campo.valor ?? '')}`),
           );
           continue;
         }
@@ -616,35 +640,85 @@ function construirCuerpo(
         if (!campo.habilitado) continue;
         const nombre = campo.nombre.trim();
         if (nombre === '') continue;
+
         if (campo.esFichero) {
+          // FASE 7 §3.3: se emite `--form 'f=@fichero'` DE VERDAD, en vez de
+          // omitir el campo. El fichero vive en el servidor, así que la ruta
+          // es una **ruta local relativa explícita** (`./nombre`) y va
+          // acompañada de advertencia: eso es declarar la limitación, no
+          // inventar una equivalencia. Un `--form` sin el campo produciría un
+          // cuerpo distinto del guardado y el usuario no se enteraría.
+          const nombreFichero = nombreLocalDeAdjunto(campo);
+          if (nombreFichero === null) {
+            advertencias.push(
+              `El campo «${nombre}» es un fichero adjunto del que no se conoce el nombre original. No se puede escribir un \`--form '${nombre}=@…'\` honesto y se ha omitido.`,
+            );
+            continue;
+          }
+          const tipo = tipoDeAdjunto(campo);
+          partes.push('--form', entrecomillar(`${nombre}=@./${nombreFichero}${tipo}`));
           advertencias.push(
-            `El campo «${nombre}» es un fichero adjunto guardado en el servidor. cURL necesita una ruta local: añade \`--form '${nombre}=@/ruta/al/fichero'\`. El contenido no se puede incrustar en el comando.`,
+            `El campo «${nombre}» adjunta un fichero que está GUARDADO EN EL SERVIDOR, no en tu máquina. El comando lleva \`@./${nombreFichero}\`: cURL leerá ese fichero del directorio desde el que lo ejecutes. Descárgalo ahí antes, o cambia la ruta.`,
           );
           continue;
         }
+
         if (campo.esSecreto) {
           const marcador = nombreDeMarcador(`form_${nombre}`);
-          partes.push('--form', entrecomillarConMarcador(`${nombre}=$${marcador}`));
+          // `--form-string` y no `--form`: ver el bloque de abajo. Si el
+          // secreto expandido empezara por `@`, `--form` subiría un fichero
+          // de la máquina del usuario en su lugar.
+          partes.push('--form-string', entrecomillarConMarcador(`${nombre}=$${marcador}`));
           advertencias.push(
             `El campo «${nombre}» del formulario está marcado como secreto: el comando lleva el marcador \`$${marcador}\`, nunca el valor.`,
           );
           continue;
         }
-        const sufijo =
-          campo.contentType !== null && campo.contentType.trim() !== ''
-            ? `;type=${campo.contentType.trim()}`
-            : '';
-        partes.push('--form', entrecomillar(`${nombre}=${campo.valor ?? ''}${sufijo}`));
+
+        // DEFECTO CORREGIDO EN LA FASE 7. En `--form`, cURL interpreta un
+        // valor que empiece por `@` como «léelo de este fichero» y uno que
+        // empiece por `<` como «léelo de este fichero, sin adjuntarlo». Un
+        // campo de texto cuyo valor fuera `@/etc/passwd` hacía que el
+        // comando **subiera un fichero de la máquina de quien lo pega**. Las
+        // comillas simples NO protegen: quien interpreta el `@` es cURL.
+        // `--form-string` envía el valor literal y no mira el primer carácter.
+        const valor = campo.valor ?? '';
+        const tipo = tipoDeAdjunto(campo);
+        if (tipo === '') {
+          partes.push('--form-string', entrecomillar(`${nombre}=${valor}`));
+          continue;
+        }
+        // `--form-string` no admite `;type=`. Con un Content-Type por campo
+        // hay que usar `--form`, y entonces el valor tiene que ser inocuo.
+        if (/^[@<]/u.test(valor) || valor.includes(';') || valor.includes(',')) {
+          partes.push('--form-string', entrecomillar(`${nombre}=${valor}`));
+          advertencias.push(
+            `El campo «${nombre}» lleva un Content-Type propio (\`${tipo.slice(6)}\`) pero su valor contiene caracteres que cURL interpretaría (\`@\`, \`<\`, \`;\` o \`,\`). Se emite con \`--form-string\` para no cambiar el contenido, y el Content-Type del campo NO se conserva.`,
+          );
+          continue;
+        }
+        partes.push('--form', entrecomillar(`${nombre}=${valor}${tipo}`));
       }
       // Nunca se fija `Content-Type` en multipart: cURL calcula el `boundary`.
       return { partes, contentType: null };
     }
 
     case 'binary_file': {
+      // FASE 7 §3.3: `--data-binary @fichero`. Mismo criterio que en multipart:
+      // se emite el comando con una ruta local explícita **y** se advierte de
+      // que los bytes están en el servidor.
+      const nombreFichero = sanearNombreLocal(peticion.nombreDelFicheroBinario ?? null);
+      if (!peticion.tieneFicheroBinario || nombreFichero === null) {
+        advertencias.push(
+          'El cuerpo es un fichero binario guardado en el servidor y no se conoce su nombre original. El comando se genera SIN cuerpo en vez de inventar una equivalencia falsa: descárgalo y añade `--data-binary @fichero`.',
+        );
+        return { partes, contentType: null };
+      }
+      partes.push('--data-binary', entrecomillar(`@./${nombreFichero}`));
       advertencias.push(
-        'El cuerpo es un fichero binario guardado en el servidor. cURL no puede referenciarlo: descárgalo y usa `--data-binary @fichero`. El comando se genera SIN cuerpo en vez de inventar una equivalencia falsa.',
+        `El cuerpo es un fichero binario GUARDADO EN EL SERVIDOR, no en tu máquina. El comando lleva \`--data-binary '@./${nombreFichero}'\`: cURL leerá ese fichero del directorio desde el que lo ejecutes. Descárgalo ahí antes, o cambia la ruta.`,
       );
-      return { partes, contentType: null };
+      return { partes, contentType };
     }
 
     case 'custom':
@@ -658,6 +732,40 @@ function construirCuerpo(
       return { partes, contentType };
     }
   }
+}
+
+/**
+ * Sufijo `;type=…` de un campo de formulario, vacío si no hay Content-Type.
+ * Se sanea: un `;` o una `,` dentro del tipo partirían los parámetros que lee
+ * cURL y cambiarían el significado del campo.
+ */
+function tipoDeAdjunto(campo: CampoDeFormularioParaCurl): string {
+  const bruto = campo.contentType?.trim() ?? '';
+  if (bruto === '') return '';
+  if (!/^[A-Za-z0-9!#$%&'*+\-.^_`|~]+\/[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/u.test(bruto)) return '';
+  return `;type=${bruto}`;
+}
+
+/** Nombre de fichero utilizable como ruta local en el comando. */
+function nombreLocalDeAdjunto(campo: CampoDeFormularioParaCurl): string | null {
+  return sanearNombreLocal(campo.nombreDelFichero ?? null);
+}
+
+/**
+ * El nombre original viene de `files.original_filename`, que es **dato del
+ * cliente**. Aquí se convierte en un trozo de línea de comandos, así que se
+ * le quitan los separadores de ruta, los caracteres de control y los que cURL
+ * interpreta dentro de un `--form` (`;` y `,`). El entrecomillado POSIX hace
+ * el resto; esto es la capa de cURL, que el entrecomillado no cubre.
+ */
+function sanearNombreLocal(bruto: string | null): string | null {
+  if (bruto === null) return null;
+  const limpio = (bruto.split(/[/\\]/u).pop() ?? '')
+    .replace(new RegExp(CONTROL_PROHIBIDO.source, 'gu'), '')
+    .replace(/[;,]/gu, '_')
+    .trim();
+  if (limpio === '' || limpio === '.' || limpio === '..') return null;
+  return limpio.slice(0, 255);
 }
 
 function contarMarcadores(texto: string): string[] {

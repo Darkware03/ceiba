@@ -3,7 +3,12 @@ import {
   CLIENTE_PRISMA,
   type InstanciaClientePrisma,
 } from '../../platform/persistence/prisma/prisma-client.ts';
-import { MODOS_CRUDOS, MODOS_DE_FORMULARIO } from './dto/request.dto.ts';
+import {
+  MODOS_CON_ADJUNTOS,
+  MODOS_CRUDOS,
+  MODOS_DE_FORMULARIO,
+  MODOS_SIN_CONTENIDO_CRUDO,
+} from './dto/request.dto.ts';
 
 /**
  * ════════════════════════════════════════════════════════════════════════════
@@ -48,6 +53,16 @@ export interface EntradaClaveValor {
   readonly description?: string | null | undefined;
 }
 
+/** Campo de `request_body_fields` tal y como entra desde el contrato (§2.1). */
+export interface EntradaCampoDeCuerpo {
+  readonly key: string;
+  readonly kind?: 'text' | 'file' | undefined;
+  readonly value?: string | null | undefined;
+  readonly fileId?: string | null | undefined;
+  readonly contentType?: string | null | undefined;
+  readonly enabled?: boolean | undefined;
+}
+
 export interface DatosDePeticion {
   readonly name: string;
   readonly method: string;
@@ -59,6 +74,9 @@ export interface DatosDePeticion {
   readonly queryParams: readonly EntradaClaveValor[] | undefined;
   readonly bodyType: string;
   readonly body: string | null;
+  readonly bodyContentType: string | null | undefined;
+  readonly bodyFields: readonly EntradaCampoDeCuerpo[] | undefined;
+  readonly binaryFileId: string | null | undefined;
   readonly sortKey: string | null;
 }
 
@@ -328,7 +346,11 @@ export class RepositorioDePeticiones {
     ahora: Date,
   ): Promise<string> {
     const sortKey = datos.sortKey ?? (await this.siguienteClaveDeOrden(coleccionId, datos.folderId));
-    const cuerpo = construirCuerpo(datos.bodyType, datos.body);
+    const cuerpo = construirCuerpo(datos.bodyType, datos.body, {
+      contentType: datos.bodyContentType,
+      campos: datos.bodyFields,
+      binaryFileId: datos.binaryFileId,
+    });
 
     const creada = await this.prisma.apiRequest.create({
       data: {
@@ -360,7 +382,10 @@ export class RepositorioDePeticiones {
    */
   async actualizar(
     peticionId: string,
-    cambios: Partial<DatosDePeticion> & { readonly bodyTypePresente: boolean },
+    cambios: Partial<DatosDePeticion> & {
+      readonly bodyTypePresente: boolean;
+      readonly binaryFileIdPresente?: boolean;
+    },
     ahora: Date,
   ): Promise<void> {
     await this.prisma.$transaction(async (tx) => {
@@ -418,19 +443,88 @@ export class RepositorioDePeticiones {
         }
       }
 
-      if (cambios.bodyTypePresente || cambios.body !== undefined) {
+      const tocaCuerpo =
+        cambios.bodyTypePresente ||
+        cambios.body !== undefined ||
+        cambios.bodyFields !== undefined ||
+        cambios.bodyContentType !== undefined ||
+        cambios.binaryFileIdPresente === true;
+
+      if (tocaCuerpo) {
         const actual = await tx.apiRequest.findUnique({
           where: { id: peticionId },
-          select: { bodyMode: true, requestBodies: { select: { id: true, rawContent: true } } },
+          select: {
+            bodyMode: true,
+            requestBodies: {
+              select: { id: true, rawContent: true, contentType: true, binaryFileId: true },
+            },
+          },
         });
+        // `bodyMode` ya viene actualizado: el `update` de arriba corrió antes
+        // en la misma transacción. Es el ESTADO FINAL, que es contra lo que
+        // manda `ck_body_mode_shape`.
         const modo = String(actual?.bodyMode ?? 'none');
-        const crudoPrevio = actual?.requestBodies?.rawContent ?? null;
-        const contenido = cambios.body !== undefined ? cambios.body : crudoPrevio;
-        const nuevo = construirCuerpo(modo, contenido ?? null);
+        const previo = actual?.requestBodies ?? null;
 
-        await tx.requestBody.deleteMany({ where: { apiRequestId: peticionId } });
-        if (nuevo !== null) {
+        const contenido =
+          cambios.body !== undefined ? cambios.body : (previo?.rawContent ?? null);
+        const contentType =
+          cambios.bodyContentType !== undefined
+            ? cambios.bodyContentType
+            : (previo?.contentType ?? null);
+        const binaryFileId =
+          cambios.binaryFileIdPresente === true
+            ? (cambios.binaryFileId ?? null)
+            : (previo?.binaryFileId ?? null);
+
+        const nuevo = construirCuerpo(modo, contenido, {
+          contentType,
+          campos: cambios.bodyFields,
+          binaryFileId,
+        });
+
+        if (nuevo === null) {
+          await tx.requestBody.deleteMany({ where: { apiRequestId: peticionId } });
+        } else if (previo === null) {
           await tx.requestBody.create({ data: { ...nuevo, apiRequestId: peticionId } });
+        } else {
+          // NO se borra y recrea la fila: el borrado arrastra en cascada
+          // `request_body_fields`, y con ella los campos secretos, que el
+          // cliente **no puede devolver** porque nunca vio su valor. Sería la
+          // misma pérdida silenciosa que el repositorio ya evita en las
+          // cabeceras. Se actualiza en el sitio.
+          const { requestBodyFields, ...columnas } = nuevo;
+          await tx.requestBody.update({
+            where: { id: previo.id },
+            data: { ...columnas, updatedAt: ahora },
+          });
+
+          const secretos = await tx.requestBodyField.findMany({
+            where: { requestBodyId: previo.id, isSecret: true },
+            select: { fieldName: true },
+          });
+          const reservados = new Set(secretos.map((s) => s.fieldName.toLowerCase()));
+
+          if (cambios.bodyFields !== undefined) {
+            await tx.requestBodyField.deleteMany({
+              where: { requestBodyId: previo.id, isSecret: false },
+            });
+            const entrantes = (requestBodyFields?.create ?? []).filter(
+              (c) => !reservados.has(c.fieldName.toLowerCase()),
+            );
+            if (entrantes.length > 0) {
+              await tx.requestBodyField.createMany({
+                data: entrantes.map((c) => ({ ...c, requestBodyId: previo.id })),
+              });
+            }
+          } else if (!MODOS_DE_FORMULARIO.has(modo)) {
+            // El modo final ya no admite campos: los no secretos dejan de
+            // tener sentido. Los secretos se conservan, igual que en las
+            // cabeceras, por si el usuario vuelve a un modo de formulario.
+            await tx.requestBodyField.deleteMany({
+              where: { requestBodyId: previo.id, isSecret: false },
+            });
+          }
         }
       }
     });
@@ -521,6 +615,10 @@ export class RepositorioDePeticiones {
                 create: {
                   mode: origen.cuerpo.mode as 'none',
                   contentType: origen.cuerpo.contentType,
+                  // El fichero NO se duplica: la copia referencia el mismo
+                  // objeto del mismo workspace. Duplicar los bytes sería
+                  // gastar almacén por nada y romper la deduplicación por
+                  // checksum que `files` contempla.
                   rawContent: origen.cuerpo.rawContent,
                   graphqlVariables: origen.cuerpo.graphqlVariables as object | undefined,
                   binaryFileId: origen.cuerpo.binaryFileId,
@@ -621,6 +719,8 @@ export function filasDeParametro(
 interface CampoDeCuerpoNuevo {
   fieldName: string;
   fieldValue: string | null;
+  fileId: string | null;
+  contentType: string | null;
   isSecret: boolean;
   isEnabled: boolean;
   sortOrder: number;
@@ -630,52 +730,187 @@ interface CuerpoNuevo {
   mode: 'none';
   contentType: string | null;
   rawContent: string | null;
+  binaryFileId: string | null;
   requestBodyFields?: { create: CampoDeCuerpoNuevo[] };
 }
 
+export interface ExtrasDeCuerpo {
+  readonly contentType?: string | null | undefined;
+  readonly campos?: readonly EntradaCampoDeCuerpo[] | undefined;
+  readonly binaryFileId?: string | null | undefined;
+}
+
 /**
- * Traduce `bodyType` + `body` a la fila de `request_bodies` que
- * `ck_body_mode_shape` admite:
+ * Traduce `bodyType` + `body` (+ los extras de la fase 7) a la fila de
+ * `request_bodies` que `ck_body_mode_shape` admite. La restricción, literal de
+ * `20261014193100_ceiba_constraints_and_indexes/migration.sql:252-256`:
  *
- *  - modos `raw_*`/`graphql` → `raw_content`.
- *  - modos de formulario     → `raw_content` NULL y el contenido desgranado en
- *    `request_body_fields`. El texto se interpreta como
- *    `application/x-www-form-urlencoded` (`a=1&b=2`), que es la forma en que
- *    viaja por el cable y la que el constructor de la web ya produce.
- *  - `none`                  → no hay fila.
+ *  - `raw_*`/`graphql`        → `binary_file_id` NULL. El contenido va a
+ *    `raw_content`.
+ *  - `binary_file`            → `raw_content` NULL **y** `binary_file_id` NOT
+ *    NULL. Sin fichero no hay fila: devolver `null` aquí sería guardar una
+ *    petición `binary_file` sin cuerpo, así que el DTO ya lo ha cortado con un
+ *    422 antes de llegar.
+ *  - `none`/`form_urlencoded`/`multipart_form_data`/`custom` → los dos NULL.
+ *    En los dos de formulario el contenido vive en `request_body_fields`.
+ *
+ * Compatibilidad: la firma de dos argumentos sigue valiendo y se comporta
+ * igual que en la fase 6 (texto urlencoded desgranado en campos de texto).
  */
-export function construirCuerpo(modo: string, contenido: string | null): CuerpoNuevo | null {
+export function construirCuerpo(
+  modo: string,
+  contenido: string | null,
+  extras: ExtrasDeCuerpo = {},
+): CuerpoNuevo | null {
+  const contentType = normalizarContentTypeDeCuerpo(extras.contentType);
+
   if (modo === 'none') return null;
 
   if (MODOS_CRUDOS.has(modo)) {
-    if (contenido === null || contenido === '') return null;
-    return { mode: modo as 'none', contentType: null, rawContent: contenido };
+    if ((contenido === null || contenido === '') && contentType === null) return null;
+    return verificarForma(modo, {
+      mode: modo as 'none',
+      contentType,
+      rawContent: contenido === '' ? null : contenido,
+      binaryFileId: null,
+    });
+  }
+
+  if (modo === 'binary_file') {
+    const ficheroId = extras.binaryFileId ?? null;
+    // `ck_body_mode_shape` exige el fichero. Sin él no se escribe nada: el 422
+    // lo da el DTO, y este `null` es la red por si alguien llama directo.
+    if (ficheroId === null) return null;
+    return verificarForma(modo, {
+      mode: modo as 'none',
+      contentType,
+      rawContent: null,
+      binaryFileId: ficheroId,
+    });
   }
 
   if (MODOS_DE_FORMULARIO.has(modo)) {
-    const campos: CampoDeCuerpoNuevo[] = [];
-    if (contenido !== null && contenido.trim() !== '') {
-      let indice = 0;
-      for (const [nombre, valor] of new URLSearchParams(contenido)) {
-        if (nombre.trim() === '') continue;
-        campos.push({
-          fieldName: nombre,
-          fieldValue: valor,
-          isSecret: false,
-          isEnabled: true,
-          sortOrder: indice,
-        });
-        indice += 1;
-      }
-    }
-    return {
+    const admiteAdjuntos = MODOS_CON_ADJUNTOS.has(modo);
+    const campos: CampoDeCuerpoNuevo[] =
+      extras.campos !== undefined
+        ? camposDesdeContrato(extras.campos, admiteAdjuntos)
+        : camposDesdeTextoUrlencoded(contenido);
+    return verificarForma(modo, {
       mode: modo as 'none',
-      contentType: null,
+      contentType,
       rawContent: null,
+      binaryFileId: null,
       ...(campos.length > 0 ? { requestBodyFields: { create: campos } } : {}),
-    };
+    });
   }
 
-  // `binary_file` y `custom` no llegan aquí: el DTO los rechaza con 422.
-  return null;
+  // `custom`: el CHECK obliga a los dos NULL. Se guarda la fila porque puede
+  // llevar `content_type`, que es lo único que un modo sin forma definida
+  // puede aportar.
+  return verificarForma(modo, {
+    mode: modo as 'none',
+    contentType,
+    rawContent: null,
+    binaryFileId: null,
+  });
+}
+
+/**
+ * Última red antes de PostgreSQL: comprueba en código lo mismo que comprueba
+ * `ck_body_mode_shape`.
+ *
+ * No es paranoia decorativa. Si alguien añade mañana un modo al enum y olvida
+ * una rama aquí, el síntoma sin esto es un **500** con el texto
+ * «violates check constraint "ck_body_mode_shape"», que además publica el
+ * nombre de la restricción. Con esto el síntoma es un error de programación
+ * con el modo culpable en el mensaje, y la prueba que lo detecta es la del
+ * propio repositorio.
+ */
+function verificarForma(modo: string, fila: CuerpoNuevo): CuerpoNuevo {
+  if (MODOS_SIN_CONTENIDO_CRUDO.has(modo)) {
+    if (fila.rawContent !== null || fila.binaryFileId !== null) {
+      throw new Error(`ck_body_mode_shape: el modo ${modo} exige raw_content y binary_file_id NULL`);
+    }
+    return fila;
+  }
+  if (modo === 'binary_file') {
+    if (fila.rawContent !== null || fila.binaryFileId === null) {
+      throw new Error('ck_body_mode_shape: binary_file exige raw_content NULL y binary_file_id NOT NULL');
+    }
+    return fila;
+  }
+  if (fila.binaryFileId !== null) {
+    throw new Error(`ck_body_mode_shape: el modo ${modo} exige binary_file_id NULL`);
+  }
+  return fila;
+}
+
+/**
+ * `ck_bodyfield_xor`: como mucho UNA fuente de valor por fila. Aquí se
+ * garantiza eligiendo según `kind` y poniendo la otra a NULL **de forma
+ * explícita**, no por omisión.
+ *
+ * Los campos secretos no se crean por esta ruta: exigirían `secret_id`, y el
+ * cliente no tiene todavía forma de referenciar un secreto. `is_secret` sale
+ * siempre `false`, que es lo único que el CHECK permite sin `secret_id`.
+ */
+function camposDesdeContrato(
+  entradas: readonly EntradaCampoDeCuerpo[],
+  admiteAdjuntos: boolean,
+): CampoDeCuerpoNuevo[] {
+  const campos: CampoDeCuerpoNuevo[] = [];
+  for (const entrada of entradas) {
+    const nombre = entrada.key.trim();
+    if (nombre === '') continue;
+    const tipo = entrada.kind ?? (entrada.fileId != null ? 'file' : 'text');
+    const esFichero = tipo === 'file' && entrada.fileId != null;
+    if (esFichero && !admiteAdjuntos) {
+      // `form_urlencoded` no puede llevar ficheros por el cable. Se descarta
+      // en vez de guardar algo que no se podría enviar nunca.
+      continue;
+    }
+    campos.push({
+      fieldName: nombre,
+      fieldValue: esFichero ? null : (entrada.value ?? ''),
+      fileId: esFichero ? (entrada.fileId ?? null) : null,
+      contentType: normalizarContentTypeDeCuerpo(entrada.contentType),
+      isSecret: false,
+      isEnabled: entrada.enabled !== false,
+      sortOrder: 0,
+    });
+  }
+  return campos.map((c, indice) => ({ ...c, sortOrder: indice }));
+}
+
+/**
+ * Compatibilidad con la fase 6: el texto llega como
+ * `application/x-www-form-urlencoded` (`a=1&b=2`), que es la forma en que
+ * viaja por el cable y la que el constructor de la web producía.
+ */
+function camposDesdeTextoUrlencoded(contenido: string | null): CampoDeCuerpoNuevo[] {
+  const campos: CampoDeCuerpoNuevo[] = [];
+  if (contenido === null || contenido.trim() === '') return campos;
+  let indice = 0;
+  for (const [nombre, valor] of new URLSearchParams(contenido)) {
+    if (nombre.trim() === '') continue;
+    campos.push({
+      fieldName: nombre,
+      fieldValue: valor,
+      fileId: null,
+      contentType: null,
+      isSecret: false,
+      isEnabled: true,
+      sortOrder: indice,
+    });
+    indice += 1;
+  }
+  return campos;
+}
+
+/** Un `content_type` con CR/LF acabaría en una cabecera. Se corta aquí. */
+function normalizarContentTypeDeCuerpo(bruto: string | null | undefined): string | null {
+  if (bruto === null || bruto === undefined) return null;
+  // eslint-disable-next-line no-control-regex
+  const limpio = bruto.replace(/[\u0000-\u001f\u007f]/gu, '').trim();
+  return limpio === '' ? null : limpio.slice(0, 255);
 }

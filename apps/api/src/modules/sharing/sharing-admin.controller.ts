@@ -60,7 +60,12 @@ export class ControladorDeComparticionDeColeccion {
     @Param('collectionId') collectionId: string,
     @Body(new PipeZod(esquemaCrearEnlace)) cuerpo: z.infer<typeof esquemaCrearEnlace>,
     @Req() peticion: PeticionHttp,
-  ): Promise<{ share: VistaDeEnlace; accessCode: string | null; aviso: string }> {
+  ): Promise<{
+    share: VistaDeEnlace;
+    inviteUrl: string;
+    accessCode: string | null;
+    aviso: string;
+  }> {
     const workspaceId = workspaceDe(peticion);
     const creado = await this.admin.crearEnlace(
       collectionId,
@@ -82,8 +87,22 @@ export class ControladorDeComparticionDeColeccion {
       ipDe(peticion),
     );
 
+    const vista = vistaDeEnlace(creado.enlace, creado.codigo, this.config.urlPublica);
+
     return {
-      share: vistaDeEnlace(creado.enlace, creado.codigo, this.config.urlPublica),
+      share: vista,
+      // FASE 7, P7 — campo ADITIVO, mismo valor que `share.url`.
+      //
+      // No es redundancia gratuita: la prueba de aceptación de P7 es que el
+      // frontend obtenga «en UNA sola llamada un enlace que se pueda pegar en un
+      // chat», tanto de un workspace como de una colección. El workspace lo
+      // devuelve en `inviteUrl` (`studio-collab.service.ts`), así que la
+      // colección lo devuelve con EL MISMO NOMBRE. Un solo campo que leer en los
+      // dos casos, en vez de que la interfaz tenga que saber de qué tipo de
+      // recurso venía la respuesta para elegir dónde mirar.
+      //
+      // `share.url` se conserva intacto: hay pruebas de la fase 5 que lo leen.
+      inviteUrl: vista.url,
       // ÚNICA vez que el código sale de la API. No hay ninguna ruta que lo
       // devuelva después, porque no existe en ninguna columna.
       accessCode: creado.codigoEnClaro,

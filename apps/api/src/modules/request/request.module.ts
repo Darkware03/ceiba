@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ModuloDeFicheros } from '../file/file.public.ts';
 import {
   ControladorDePeticiones,
   ControladorDePeticionesDeColeccion,
@@ -21,6 +22,12 @@ import { ServicioDePeticiones } from './request.service.ts';
  * cabeceras, parámetros y cuerpos.
  */
 @Module({
+  // FASE 7: depende de `file` **en un solo sentido**. `file` no importa nada
+  // de `request` (consulta `request_bodies` por Prisma, sin `import`), así que
+  // no hay ciclo y `madge --circular` sigue limpio. La dependencia existe
+  // porque un `fileId` ajeno al workspace tiene que ser 422 **antes** de
+  // llegar a la clave ajena.
+  imports: [ModuloDeFicheros],
   controllers: [ControladorDePeticionesDeColeccion, ControladorDePeticiones],
   providers: [RepositorioDePeticiones, ServicioDePeticiones],
   exports: [ServicioDePeticiones, RepositorioDePeticiones],

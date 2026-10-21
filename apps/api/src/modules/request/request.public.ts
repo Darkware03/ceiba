@@ -4,3 +4,12 @@ export { ServicioDePeticiones } from './request.service.ts';
 export { RepositorioDePeticiones } from './request.repository.ts';
 export { generarCurl, PREFIJO_DE_SECRETO } from './curl.ts';
 export type { PeticionParaCurl, ResultadoCurl } from './curl.ts';
+export {
+  construirCuerpoParaElMotor,
+  modoDelMotor,
+} from './engine-body.ts';
+export type {
+  CuerpoParaElMotor,
+  ParteParaElMotor,
+  ResultadoCuerpoParaElMotor,
+} from './engine-body.ts';

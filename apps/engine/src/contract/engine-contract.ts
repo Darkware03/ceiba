@@ -64,7 +64,16 @@ const bodySchema = z.strictObject({
       z.strictObject({
         name: z.string().min(1),
         type: z.enum(['text', 'file']),
+        /** Valor literal de una parte `text`. Se ignora en las partes `file`. */
         value: z.string().nullable().optional(),
+        /**
+         * Bytes del fichero en base64. La API los envía INLINE porque el motor
+         * es sin estado (ADR-0002): no comparte sistema de ficheros con la API
+         * y no puede resolver `fileRef` por su cuenta. Es el único camino
+         * soportado para `type: 'file'`.
+         */
+        content: z.string().nullable().optional(),
+        /** Referencia opaca a un fichero subido. NO resoluble por el motor. */
         fileRef: z.string().nullable().optional(),
         filename: z.string().nullable().optional(),
         contentType: z.string().nullable().optional(),

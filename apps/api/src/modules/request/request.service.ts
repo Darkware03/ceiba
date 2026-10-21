@@ -5,6 +5,16 @@ import { ACCION_AUDITORIA, PUERTO_DE_AUDITORIA, type PuertoDeAuditoria } from '.
 import type { ResolutorDeRecurso } from '../../platform/auth/ports.ts';
 import { RegistroDeResolutores } from '../../platform/auth/resource-resolver.registry.ts';
 import {
+  RepositorioDeFicheros,
+  ServicioDeFicheros,
+  vistaBreveDeFichero,
+  type FilaFichero,
+} from '../file/file.public.ts';
+import {
+  construirCuerpoParaElMotor,
+  type ResultadoCuerpoParaElMotor,
+} from './engine-body.ts';
+import {
   RepositorioDePeticiones,
   type FilaCarpeta,
   type FilaPeticion,
@@ -17,7 +27,11 @@ import {
   type PeticionParaCurl,
   type ResultadoCurl,
 } from './curl.ts';
-import type { EntradaActualizarPeticion, EntradaCrearPeticion } from './dto/request.dto.ts';
+import {
+  problemasDeFormaDelCuerpo,
+  type EntradaActualizarPeticion,
+  type EntradaCrearPeticion,
+} from './dto/request.dto.ts';
 
 /**
  * ════════════════════════════════════════════════════════════════════════════
@@ -51,6 +65,8 @@ export class ServicioDePeticiones implements ResolutorDeRecurso, OnModuleInit {
 
   constructor(
     private readonly repo: RepositorioDePeticiones,
+    private readonly ficheros: RepositorioDeFicheros,
+    private readonly servicioDeFicheros: ServicioDeFicheros,
     @Inject(RELOJ) private readonly reloj: Reloj,
     @Inject(PUERTO_DE_AUDITORIA) private readonly auditoria: PuertoDeAuditoria,
     private readonly resolutores: RegistroDeResolutores,
@@ -101,6 +117,8 @@ export class ServicioDePeticiones implements ResolutorDeRecurso, OnModuleInit {
       ]);
     }
 
+    await this.#comprobarFicheros(coleccion.workspaceId, entrada);
+
     const id = await this.repo.crear(
       coleccionId,
       {
@@ -114,6 +132,9 @@ export class ServicioDePeticiones implements ResolutorDeRecurso, OnModuleInit {
         queryParams: entrada.queryParams,
         bodyType: entrada.bodyType ?? 'none',
         body: entrada.body ?? null,
+        bodyContentType: entrada.bodyContentType,
+        bodyFields: entrada.bodyFields,
+        binaryFileId: entrada.binaryFileId,
         sortKey: entrada.sortKey ?? null,
       },
       actorId,
@@ -184,6 +205,32 @@ export class ServicioDePeticiones implements ResolutorDeRecurso, OnModuleInit {
       ]);
     }
 
+    // `ck_body_mode_shape` manda sobre el ESTADO FINAL, igual que el verbo.
+    // Un PATCH que sólo trae `bodyFields` sobre una fila que es `raw_json`
+    // sería una fila imposible, y el DTO no lo puede ver porque no conoce el
+    // modo guardado.
+    const modoFinal = cambios.bodyType ?? actual.bodyMode;
+    const binarioFinal =
+      cambios.binaryFileId !== undefined
+        ? cambios.binaryFileId
+        : (actual.cuerpo?.binaryFileId ?? null);
+    const problemas = problemasDeFormaDelCuerpo({
+      bodyType: modoFinal,
+      ...(cambios.body !== undefined ? { body: cambios.body } : {}),
+      ...(cambios.bodyFields !== undefined ? { bodyFields: cambios.bodyFields } : {}),
+      binaryFileId: binarioFinal,
+    });
+    if (problemas.length > 0) {
+      throw new EntradaInvalida(
+        'La forma del cuerpo no es compatible con el modo resultante.',
+        problemas,
+      );
+    }
+
+    const workspaceId = await this.repo.workspaceIdDePeticion(peticionId);
+    if (workspaceId === null) throw new RecursoNoEncontrado('Petición no encontrada.');
+    await this.#comprobarFicheros(workspaceId, cambios);
+
     await this.repo.actualizar(
       peticionId,
       {
@@ -197,8 +244,14 @@ export class ServicioDePeticiones implements ResolutorDeRecurso, OnModuleInit {
         ...(cambios.queryParams !== undefined ? { queryParams: cambios.queryParams } : {}),
         ...(cambios.bodyType !== undefined ? { bodyType: cambios.bodyType } : {}),
         ...(cambios.body !== undefined ? { body: cambios.body } : {}),
+        ...(cambios.bodyContentType !== undefined
+          ? { bodyContentType: cambios.bodyContentType }
+          : {}),
+        ...(cambios.bodyFields !== undefined ? { bodyFields: cambios.bodyFields } : {}),
+        ...(cambios.binaryFileId !== undefined ? { binaryFileId: cambios.binaryFileId } : {}),
         ...(cambios.sortKey !== undefined ? { sortKey: cambios.sortKey } : {}),
         bodyTypePresente: cambios.bodyType !== undefined,
+        binaryFileIdPresente: cambios.binaryFileId !== undefined,
       },
       this.reloj.ahora(),
     );
@@ -286,7 +339,7 @@ export class ServicioDePeticiones implements ResolutorDeRecurso, OnModuleInit {
 
   async comoCurl(peticionId: string, actorId: string, ip: string): Promise<ResultadoCurl> {
     const fila = await this.obtener(peticionId);
-    const resultado = generarCurl(aPeticionParaCurl(fila));
+    const resultado = generarCurl(aPeticionParaCurl(fila, await this.#ficherosDe(fila)));
     this.auditoria.registrar({
       accion: 'request.exported.curl',
       actorUserId: actorId,
@@ -300,6 +353,81 @@ export class ServicioDePeticiones implements ResolutorDeRecurso, OnModuleInit {
       detalles: { advertencias: resultado.advertencias.length },
     });
     return resultado;
+  }
+
+  // -------------------------------------------------------------------------
+  // Enriquecimiento con metadatos de fichero
+  // -------------------------------------------------------------------------
+
+  /**
+   * Vista de detalle **con** los metadatos de los ficheros referenciados. El
+   * controlador usa ésta y no `vistaDetalle` a secas, porque `binaryFile`
+   * exige una consulta a `files` que una función pura no puede hacer.
+   */
+  async detalle(fila: FilaPeticionCompleta): Promise<Record<string, unknown>> {
+    return vistaDetalle(fila, await this.#ficherosDe(fila));
+  }
+
+  /**
+   * Cuerpo listo para `POST /v1/execute` del motor, **con los bytes de los
+   * adjuntos en base64**. Cierra el §3.A.4: el motor ya sabe enviar multipart
+   * con ficheros y aquí está el traductor.
+   *
+   * **Todavía no lo llama nadie**: quien habla con el motor es
+   * `modules/studio`, que está fuera de mi ámbito. Está escrito, probado y
+   * documentado en `CUERPO-Y-CURL.md` §8 para que integrarlo sea una línea.
+   */
+  async cuerpoParaElMotor(peticionId: string): Promise<ResultadoCuerpoParaElMotor> {
+    const fila = await this.obtener(peticionId);
+    return construirCuerpoParaElMotor(
+      {
+        bodyMode: fila.cuerpo?.mode ?? fila.bodyMode,
+        rawContent: fila.cuerpo?.rawContent ?? null,
+        contentType: fila.cuerpo?.contentType ?? null,
+        binaryFileId: fila.cuerpo?.binaryFileId ?? null,
+        campos: fila.cuerpo?.campos ?? [],
+      },
+      (fileId) => this.servicioDeFicheros.bytesEnBase64(fileId),
+    );
+  }
+
+  async #ficherosDe(fila: FilaPeticionCompleta): Promise<Map<string, FilaFichero>> {
+    const ids: string[] = [];
+    if (fila.cuerpo?.binaryFileId != null) ids.push(fila.cuerpo.binaryFileId);
+    for (const campo of fila.cuerpo?.campos ?? []) {
+      if (campo.fileId != null) ids.push(campo.fileId);
+    }
+    if (ids.length === 0) return new Map();
+    return this.ficheros.metadatosDe(ids);
+  }
+
+  /**
+   * Un `fileId` que no sea de ESTE workspace es 422, no un 500 de clave
+   * ajena. Es la frontera que impide adjuntar el fichero de otro workspace
+   * conociendo su UUID: sin esto, `request_body_fields.file_id` sería un
+   * puente entre workspaces que la autorización por recurso no ve.
+   */
+  async #comprobarFicheros(
+    workspaceId: string,
+    entrada: {
+      readonly binaryFileId?: string | null | undefined;
+      readonly bodyFields?: readonly { readonly fileId?: string | null | undefined }[] | undefined;
+    },
+  ): Promise<void> {
+    const ids: string[] = [];
+    if (typeof entrada.binaryFileId === 'string') ids.push(entrada.binaryFileId);
+    for (const campo of entrada.bodyFields ?? []) {
+      if (typeof campo.fileId === 'string') ids.push(campo.fileId);
+    }
+    if (ids.length === 0) return;
+
+    const invalidos = await this.ficheros.idsInvalidosEnWorkspace(ids, workspaceId);
+    if (invalidos.length > 0) {
+      throw new EntradaInvalida(
+        'Algún fichero referenciado no existe o no pertenece a este workspace.',
+        invalidos.map((id) => `fileId: ${id} no disponible en este workspace`),
+      );
+    }
   }
 }
 
@@ -350,7 +478,12 @@ export function vistaCarpeta(fila: FilaCarpeta): Record<string, unknown> {
 }
 
 /** Detalle. El valor de un secreto NO sale: ni en claro, ni cifrado, ni enmascarado. */
-export function vistaDetalle(fila: FilaPeticionCompleta): Record<string, unknown> {
+export function vistaDetalle(
+  fila: FilaPeticionCompleta,
+  ficheros: ReadonlyMap<string, FilaFichero> = new Map(),
+): Record<string, unknown> {
+  const binarioId = fila.cuerpo?.binaryFileId ?? null;
+  const binario = binarioId === null ? undefined : ficheros.get(binarioId);
   return {
     ...vistaResumen(fila),
     externalRef: fila.externalRef,
@@ -393,15 +526,26 @@ export function vistaDetalle(fila: FilaPeticionCompleta): Record<string, unknown
         secret: p.isSecret,
       })),
     body: cuerpoVisible(fila),
+    bodyContentType: fila.cuerpo?.contentType ?? null,
     bodyFields:
-      fila.cuerpo?.campos.map((c) => ({
-        key: c.fieldName,
-        value: c.isSecret ? null : c.fieldValue,
-        enabled: c.isEnabled,
-        secret: c.isSecret,
-        file: c.fileId !== null,
-        contentType: c.contentType,
-      })) ?? [],
+      fila.cuerpo?.campos.map((c) => {
+        const adjunto = c.fileId === null ? undefined : ficheros.get(c.fileId);
+        return {
+          key: c.fieldName,
+          kind: c.fileId !== null ? 'file' : 'text',
+          value: c.isSecret || c.fileId !== null ? null : c.fieldValue,
+          enabled: c.isEnabled,
+          secret: c.isSecret,
+          file: c.fileId !== null,
+          fileId: c.fileId,
+          // Metadatos, **nunca** bytes (§2.1: «La lectura devuelve `bodyFields`
+          // y `binaryFile` … **Nunca** bytes»).
+          fileInfo: adjunto === undefined ? null : vistaBreveDeFichero(adjunto),
+          contentType: c.contentType,
+        };
+      }) ?? [],
+    binaryFileId: binarioId,
+    binaryFile: binario === undefined ? null : vistaBreveDeFichero(binario),
   };
 }
 
@@ -426,8 +570,13 @@ function cuerpoVisible(fila: FilaPeticionCompleta): string | null {
 }
 
 /** Adaptador fila → entrada del generador de cURL. */
-export function aPeticionParaCurl(fila: FilaPeticionCompleta): PeticionParaCurl {
+export function aPeticionParaCurl(
+  fila: FilaPeticionCompleta,
+  ficheros: ReadonlyMap<string, FilaFichero> = new Map(),
+): PeticionParaCurl {
   const cuerpo = fila.cuerpo;
+  const binarioId = cuerpo?.binaryFileId ?? null;
+  const binario = binarioId === null ? undefined : ficheros.get(binarioId);
   return {
     nombre: fila.name,
     metodo: fila.method,
@@ -451,15 +600,20 @@ export function aPeticionParaCurl(fila: FilaPeticionCompleta): PeticionParaCurl 
     contentTypeDelCuerpo: cuerpo?.contentType ?? null,
     variablesGraphql: cuerpo?.graphqlVariables ?? null,
     camposDeFormulario:
-      cuerpo?.campos.map((c) => ({
-        nombre: c.fieldName,
-        valor: c.isSecret ? null : c.fieldValue,
-        esSecreto: c.isSecret,
-        habilitado: c.isEnabled,
-        esFichero: c.fileId !== null,
-        contentType: c.contentType,
-      })) ?? [],
-    tieneFicheroBinario: (cuerpo?.binaryFileId ?? null) !== null,
+      cuerpo?.campos.map((c) => {
+        const adjunto = c.fileId === null ? undefined : ficheros.get(c.fileId);
+        return {
+          nombre: c.fieldName,
+          valor: c.isSecret ? null : c.fieldValue,
+          esSecreto: c.isSecret,
+          habilitado: c.isEnabled,
+          esFichero: c.fileId !== null,
+          nombreDelFichero: adjunto?.originalFilename ?? null,
+          contentType: c.contentType ?? adjunto?.contentType ?? null,
+        };
+      }) ?? [],
+    tieneFicheroBinario: binarioId !== null,
+    nombreDelFicheroBinario: binario?.originalFilename ?? null,
     timeoutMs: fila.timeoutMs,
     politicaDeRedireccion: fila.redirectPolicy,
     maxRedirecciones: fila.maxRedirects,

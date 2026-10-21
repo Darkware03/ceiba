@@ -18,6 +18,11 @@ import {
   DatosDeEntradaInvalidos as ErrorValidacion,
 } from '../../platform/errors/domain-errors.js';
 import { PrismaClientService as ClientePrisma } from '../../platform/persistence/prisma/prisma-client.js';
+import {
+  construirCuerpoParaElMotor,
+  type CampoDeCuerpoParaElMotor,
+} from '../request/engine-body.js';
+import { ServicioDeFicheros } from '../file/file.service.js';
 import { StudioCollaborationService } from './studio-collab.service.js';
 
 export interface VariableEntornoInput {
@@ -38,6 +43,21 @@ export interface EjecutarPeticionInput {
   queryParams?: Array<{ key: string; value: string; enabled?: boolean }>;
   bodyType?: string;
   body?: string | null;
+  /**
+   * Campos de `form_urlencoded` y `multipart_form_data` (§2.1 del BRIEF-FASE7).
+   * `kind: 'file'` lleva `fileId`; `kind: 'text'` lleva `value`. Nunca los dos.
+   */
+  bodyFields?: Array<{
+    key: string;
+    kind?: 'text' | 'file';
+    value?: string | null;
+    fileId?: string | null;
+    contentType?: string | null;
+    enabled?: boolean;
+    isSecret?: boolean;
+  }>;
+  /** Sólo en `binary_file`. */
+  binaryFileId?: string | null;
   timeoutMs?: number;
   /** Enlaza la entrada de historial con la tirada de coleccion que la origino. */
   collectionRunId?: string | null;
@@ -118,6 +138,45 @@ function aVariableDeRespuesta(v: FilaVariableDeEntorno) {
 /** Valor efectivo de una variable para interpolar. Los secretos no se resuelven aqui. */
 function valorEfectivo(v: FilaVariableDeEntorno): string {
   return v.valueKind === 'secret' ? '' : (v.currentValue ?? v.initialValue ?? '');
+}
+
+/** Tope de caracteres de `preview`. Una lista de autocompletado no es un visor. */
+const LARGO_MAXIMO_DE_VISTA_PREVIA = 120;
+
+/**
+ * **LA FRONTERA DE SECRETOS DE P6, EN UNA SOLA FUNCION.**
+ *
+ * Se aisla aqui a proposito: mientras TODO el endpoint de autocompletado
+ * construya su `preview` llamando a esta funcion, no existe ninguna rama por la
+ * que el valor de una variable secreta pueda salir. `value_kind = 'secret'`
+ * devuelve `null` ANTES de mirar ninguna columna de texto.
+ *
+ * Defensa en profundidad, no confianza: la restriccion `ck_envvar_secret_xor`
+ * del esquema ya garantiza que `initial_value` y `current_value` son NULL
+ * cuando la variable es secreta. Aun asi comprobamos el discriminador primero,
+ * porque la frontera no puede depender de que nadie haya desactivado nunca una
+ * restriccion en una migracion futura.
+ */
+function vistaPreviaDeVariable(v: FilaVariableDeEntorno): string | null {
+  if (v.valueKind === 'secret') return null;
+  const bruto = v.currentValue ?? v.initialValue;
+  if (bruto === null || bruto === undefined) return null;
+  return bruto.length > LARGO_MAXIMO_DE_VISTA_PREVIA
+    ? `${bruto.slice(0, LARGO_MAXIMO_DE_VISTA_PREVIA)}…`
+    : bruto;
+}
+
+/** Un elemento del contrato §2.3: una variable candidata para autocompletar. */
+export interface VariableDisponible {
+  readonly key: string;
+  readonly scope: 'collection' | 'workspace';
+  readonly environmentId: string;
+  readonly environmentName: string;
+  readonly isSecret: boolean;
+  readonly isEnabled: boolean;
+  readonly valueKind: string;
+  readonly preview: string | null;
+  readonly shadowed: boolean;
 }
 
 /** Host de la URL ejecutada. `request_history.url_host` es obligatorio. */
@@ -258,27 +317,46 @@ function metodoDelMotor(metodo: string): string {
   return METODOS_DEL_MOTOR.has(m) ? m : 'GET';
 }
 
-/** `bodySchema.mode` del motor: none|raw|json|form|urlencoded|binary|graphql. */
-function modoCuerpoDelMotor(tipo: string | undefined): string {
-  switch ((tipo ?? 'none').toLowerCase()) {
-    case 'json':
-    case 'raw_json':
-      return 'json';
-    case 'form_urlencoded':
-      return 'urlencoded';
-    case 'multipart':
-    case 'multipart_form_data':
-      return 'form';
-    case 'graphql':
-      return 'graphql';
-    case 'binary_file':
-      return 'binary';
-    case 'none':
-    case 'ninguno':
-      return 'none';
-    default:
-      return 'raw';
-  }
+// `modoCuerpoDelMotor` vivia aqui y se ha retirado a proposito: traducia
+// `body_mode` -> `bodySchema.mode` por su cuenta y sabia de SIETE modos, con
+// lo que `multipart_form_data` acababa enviandose como `form` SIN `parts`.
+// La traduccion canonica es ahora `modoDelMotor` dentro de
+// `../request/engine-body.ts`, que cubre los DIEZ valores del enum y ademas
+// construye el cuerpo. Dos traducciones del mismo enum en dos ficheros es
+// justo como se abrio este agujero; no se vuelve a abrir.
+
+/**
+ * Normaliza el vocabulario de la WEB al del ENUM de la base.
+ *
+ * No es un capricho: son dos vocabularios de verdad y los dos son legitimos.
+ * La web compone con nombres cortos —`MODOS_DE_CUERPO` en
+ * `apps/web/src/api/ejecucion.ts:150-157` es
+ * `none | raw | json | form_urlencoded | multipart_form_data | binary_file`—
+ * mientras que `body_mode` de PostgreSQL usa `raw_json`, `raw_text`, etc.
+ *
+ * El mapeador retirado aceptaba AMBOS; `modoDelMotor` solo acepta el del
+ * enum. Al enchufar el adaptador, `json` caia al `default` y se enviaba
+ * `none`: la peticion salia SIN CUERPO. Lo cazó la prueba
+ * «envia exactamente la forma que exige executeRequestSchema», que es
+ * exactamente para lo que estaba escrita.
+ *
+ * La conversion vive AQUI, en la frontera HTTP, y no dentro del adaptador:
+ * `engine-body.ts` habla el idioma del esquema y debe seguir haciendolo.
+ */
+const MODO_WEB_A_ENUM: Readonly<Record<string, string>> = Object.freeze({
+  json: 'raw_json',
+  raw: 'raw_text',
+  text: 'raw_text',
+  xml: 'raw_xml',
+  html: 'raw_html',
+  multipart: 'multipart_form_data',
+  urlencoded: 'form_urlencoded',
+  ninguno: 'none',
+});
+
+function modoDeCuerpoCanonico(tipo: string | undefined): string {
+  const crudo = (tipo ?? 'none').trim().toLowerCase();
+  return MODO_WEB_A_ENUM[crudo] ?? crudo;
 }
 
 /** Cabeceras y parametros viven en tablas hijas, no en columnas Json. */
@@ -327,11 +405,126 @@ export class StudioService {
     @Inject(StudioCollaborationService) private readonly collab: StudioCollaborationService,
     @Inject(SERVICIO_DE_AUDITORIA)
     private readonly auditoria: ServicioDeAuditoria,
+    @Inject(ServicioDeFicheros) private readonly ficheros: ServicioDeFicheros,
   ) {}
 
   // =========================================================================
   // 1. ENTORNOS Y VARIABLES
   // =========================================================================
+
+  /**
+   * Resuelve una coleccion a su workspace y comprueba el rol en UN solo sitio.
+   *
+   * `collections.workspace_id` es NOT NULL y esta documentado en el esquema como
+   * «Siempre presente: el workspace es la frontera de autorizacion»
+   * (`03-organization.prisma:47`). Por eso la autorizacion de cualquier ruta que
+   * cuelgue de una coleccion es exactamente la del workspace que la contiene.
+   *
+   * Devuelve 404 si la coleccion no existe o esta borrada, y delega en
+   * `verificarRolMinimo`, que ya devuelve 404 si el workspace no existe y 403 si
+   * existe pero no eres miembro. **Nunca devuelve una lista vacia a un ajeno.**
+   */
+  async #resolverColeccionAutorizada(
+    collectionId: string,
+    principal: PrincipalAutenticado,
+    rolMinimo: 'viewer' | 'editor' = 'viewer',
+  ) {
+    const coleccion = await this.prisma.client.collection.findFirst({
+      where: { id: collectionId, deletedAt: null },
+      select: { id: true, name: true, workspaceId: true },
+    });
+    if (!coleccion) {
+      throw new ErrorNoEncontrado('La colección no existe.');
+    }
+    await this.collab.verificarRolMinimo(coleccion.workspaceId, principal, rolMinimo);
+    return coleccion;
+  }
+
+  /**
+   * **P6 §2.3 — variables disponibles para autocompletar en una coleccion.**
+   *
+   * Une dos conjuntos, tal y como manda el contrato:
+   *  - los entornos del WORKSPACE (`collection_id IS NULL`), visibles por todas
+   *    sus colecciones;
+   *  - los entornos asignados a ESTA coleccion (`collection_id = :collectionId`).
+   *
+   * PRECEDENCIA (y por que la perdedora no se omite): si la misma clave existe
+   * en los dos alcances, gana la de coleccion. La perdedora sale igualmente con
+   * `shadowed: true` porque, como dice el brief, «el usuario tiene derecho a
+   * saber que existe»: si la ocultaramos, veria `{{base_url}}` resolverse a un
+   * valor que no aparece en ninguna lista y no entenderia por que.
+   *
+   * Orden de desempate, completo y determinista (no basta con el alcance: dos
+   * entornos del mismo alcance pueden definir la misma clave):
+   *   1. alcance: `collection` antes que `workspace`;
+   *   2. habilitada antes que deshabilitada — una variable con `is_enabled =
+   *      false` no se interpola, asi que no puede ser la ganadora efectiva;
+   *   3. entorno por defecto (`is_default`) antes que el resto;
+   *   4. nombre del entorno ascendente, y clave ascendente, para que dos
+   *      llamadas identicas devuelvan exactamente el mismo orden.
+   *
+   * La frontera de secretos la aplica `vistaPreviaDeVariable`, no este metodo.
+   */
+  async listarVariablesDeColeccion(collectionId: string, principal: PrincipalAutenticado) {
+    const coleccion = await this.#resolverColeccionAutorizada(collectionId, principal, 'viewer');
+
+    const entornos = await this.prisma.client.environment.findMany({
+      where: {
+        workspaceId: coleccion.workspaceId,
+        deletedAt: null,
+        // Exactamente los dos alcances del §2.3. Un entorno de OTRA coleccion
+        // del mismo workspace no entra: no es visible desde aqui.
+        OR: [{ collectionId: null }, { collectionId }],
+      },
+      include: { environmentVariables: { orderBy: { sortOrder: 'asc' } } },
+      orderBy: [{ isDefault: 'desc' }, { name: 'asc' }],
+    });
+
+    const candidatas = entornos.flatMap((env) =>
+      env.environmentVariables.map((v) => ({
+        key: v.key,
+        scope: (env.collectionId === null ? 'workspace' : 'collection') as
+          | 'collection'
+          | 'workspace',
+        environmentId: env.id,
+        environmentName: env.name,
+        isSecret: v.valueKind === 'secret',
+        isEnabled: v.isEnabled,
+        valueKind: v.valueKind,
+        preview: vistaPreviaDeVariable(v),
+        esDeColeccion: env.collectionId !== null,
+        entornoPorDefecto: env.isDefault,
+      })),
+    );
+
+    candidatas.sort((a, b) => {
+      if (a.esDeColeccion !== b.esDeColeccion) return a.esDeColeccion ? -1 : 1;
+      if (a.isEnabled !== b.isEnabled) return a.isEnabled ? -1 : 1;
+      if (a.entornoPorDefecto !== b.entornoPorDefecto) return a.entornoPorDefecto ? -1 : 1;
+      const porEntorno = a.environmentName.localeCompare(b.environmentName);
+      if (porEntorno !== 0) return porEntorno;
+      return a.key.localeCompare(b.key);
+    });
+
+    const ganadoraVista = new Set<string>();
+    const items: VariableDisponible[] = candidatas.map((c) => {
+      const yaHabiaGanadora = ganadoraVista.has(c.key);
+      ganadoraVista.add(c.key);
+      return {
+        key: c.key,
+        scope: c.scope,
+        environmentId: c.environmentId,
+        environmentName: c.environmentName,
+        isSecret: c.isSecret,
+        isEnabled: c.isEnabled,
+        valueKind: c.valueKind,
+        preview: c.preview,
+        shadowed: yaHabiaGanadora,
+      };
+    });
+
+    return { items };
+  }
 
   async listarEntornos(workspaceId: string, principal: PrincipalAutenticado) {
     await this.collab.verificarRolMinimo(workspaceId, principal, 'viewer');
@@ -349,6 +542,11 @@ export class StudioService {
     return envs.map((env) => ({
       id: env.id,
       workspaceId: env.workspaceId,
+      // Campos ADITIVOS (fase 7): sin ellos la interfaz no puede distinguir un
+      // entorno de workspace de uno de coleccion, y hasta hoy esta ruta los
+      // devolvia mezclados y sin marcar.
+      collectionId: env.collectionId,
+      scope: env.collectionId === null ? ('workspace' as const) : ('collection' as const),
       name: env.name,
       // `environments` no tiene columna `slug`. Se deriva del nombre para no
       // romper el contrato que ya consume la interfaz; no se persiste.
@@ -398,6 +596,13 @@ export class StudioService {
       description?: string | null;
       color?: string | null;
       isDefault?: boolean;
+      /**
+       * ADITIVO (fase 7). NULL/ausente = entorno del workspace, que es el
+       * comportamiento que esta ruta ha tenido siempre. Con valor, crea un
+       * entorno de COLECCION, que es lo que `Environment.collection_id` lleva
+       * soportando desde el principio y nadie habia expuesto nunca.
+       */
+      collectionId?: string | null;
       variables?: VariableEntornoInput[];
     },
     principal: PrincipalAutenticado,
@@ -409,13 +614,34 @@ export class StudioService {
       throw new ErrorValidacion('El nombre del entorno es obligatorio.');
     }
 
+    // Si se pide un entorno de coleccion, la coleccion tiene que existir Y
+    // pertenecer a este workspace. Sin esta comprobacion se podria colgar un
+    // entorno de la coleccion de otro workspace: la FK `fk_env_collection` no
+    // lo impide, porque relaciona con `collections`, no con el par
+    // (workspace, collection).
+    const collectionId = input.collectionId ?? null;
+    if (collectionId !== null) {
+      const coleccion = await this.prisma.client.collection.findFirst({
+        where: { id: collectionId, workspaceId, deletedAt: null },
+        select: { id: true },
+      });
+      if (!coleccion) {
+        throw new ErrorNoEncontrado('La colección no existe en este espacio de trabajo.');
+      }
+    }
+
     const slug = `${aRanura(nombre, 'entorno')}-${Date.now().toString(36).slice(-4)}`;
     const filasVariables = this.#aFilasDeVariables(input.variables ?? []);
 
     const creado = await this.prisma.client.$transaction(async (tx) => {
       if (input.isDefault) {
+        // `collectionId` en el filtro, y no solo `workspaceId`: el indice unico
+        // parcial del esquema es «un solo entorno por defecto POR ALCANCE»
+        // (`ON environments (workspace_id, collection_id) WHERE is_default`).
+        // Sin esta linea, marcar por defecto un entorno de workspace apagaria
+        // el entorno por defecto de cada coleccion, que es un alcance distinto.
         await tx.environment.updateMany({
-          where: { workspaceId, isDefault: true },
+          where: { workspaceId, collectionId, isDefault: true },
           data: { isDefault: false },
         });
       }
@@ -425,6 +651,7 @@ export class StudioService {
       return tx.environment.create({
         data: {
           workspaceId,
+          collectionId,
           name: nombre,
           sortKey: slug,
           description: input.description ?? null,
@@ -452,6 +679,8 @@ export class StudioService {
     return {
       id: creado.id,
       workspaceId: creado.workspaceId,
+      collectionId: creado.collectionId,
+      scope: creado.collectionId === null ? ('workspace' as const) : ('collection' as const),
       name: creado.name,
       slug,
       description: creado.description,
@@ -488,8 +717,13 @@ export class StudioService {
 
     const actualizado = await this.prisma.client.$transaction(async (tx) => {
       if (input.isDefault) {
+        // Mismo motivo que en `crearEntorno`: el «por defecto» es por alcance.
         await tx.environment.updateMany({
-          where: { workspaceId: actual.workspaceId, isDefault: true },
+          where: {
+            workspaceId: actual.workspaceId,
+            collectionId: actual.collectionId,
+            isDefault: true,
+          },
           data: { isDefault: false },
         });
       }
@@ -530,6 +764,8 @@ export class StudioService {
     return {
       id: actualizado.id,
       workspaceId: actualizado.workspaceId,
+      collectionId: actualizado.collectionId,
+      scope: actualizado.collectionId === null ? ('workspace' as const) : ('collection' as const),
       name: actualizado.name,
       slug: aRanura(actualizado.name, 'entorno'),
       description: actualizado.description,
@@ -648,6 +884,40 @@ export class StudioService {
     // `INVALID_REQUEST` (reproducido con curl contra el motor). Nunca se
     // detecto porque el fallo quedaba indistinguible del motor inalcanzable.
     // ───────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────
+    // EL CUERPO SE CONSTRUYE CON EL ADAPTADOR, NO A MANO (darkware, fase 7).
+    //
+    // Hasta aqui este bloque mandaba siempre `{ mode, raw }`. Con eso,
+    // `multipart_form_data` y `binary_file` se guardaban bien, se exportaban
+    // bien a cURL... y **se enviaban vacios**: `parts` nunca viajaba y los
+    // bytes de los adjuntos tampoco. El ambito A dejo escrito y probado
+    // `construirCuerpoParaElMotor` pero no podia enchufarlo, porque este
+    // fichero no era suyo. Esta es la union que faltaba.
+    //
+    // `bytesEnBase64` es el unico punto por el que salen bytes de un fichero
+    // subido, y el adaptador aplica el tope de 25 MiB del cuerpo entero.
+    // ─────────────────────────────────────────────────────────────────────
+    const camposDelCuerpo: CampoDeCuerpoParaElMotor[] = (input.bodyFields ?? []).map((c) => ({
+      fieldName: this.interpolar(c.key ?? '', variables),
+      fieldValue:
+        c.kind === 'file' ? null : this.interpolar(c.value ?? '', variables),
+      fileId: c.kind === 'file' ? (c.fileId ?? null) : null,
+      contentType: c.contentType ?? null,
+      isSecret: c.isSecret === true,
+      isEnabled: c.enabled !== false,
+    }));
+
+    const cuerpoDelMotor = await construirCuerpoParaElMotor(
+      {
+        bodyMode: modoDeCuerpoCanonico(input.bodyType),
+        rawContent: cuerpoInterpolado ?? null,
+        contentType: null,
+        binaryFileId: input.binaryFileId ?? null,
+        campos: camposDelCuerpo,
+      },
+      (ficheroId) => this.ficheros.bytesEnBase64(ficheroId),
+    );
+
     const idEjecucion = randomUUID();
     const enginePayload = {
       executionId: idEjecucion,
@@ -655,14 +925,7 @@ export class StudioService {
         method: metodoDelMotor(metodo),
         url: urlFinal,
         headers: headersActivos,
-        ...(cuerpoInterpolado === undefined
-          ? {}
-          : {
-              body: {
-                mode: modoCuerpoDelMotor(input.bodyType),
-                raw: cuerpoInterpolado,
-              },
-            }),
+        ...(cuerpoDelMotor.body === null ? {} : { body: cuerpoDelMotor.body }),
       },
       policy: {
         timeoutMs: Math.min(Math.max(input.timeoutMs ?? 15000, 500), 30000),

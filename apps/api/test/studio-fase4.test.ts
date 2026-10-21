@@ -34,6 +34,7 @@ import {
   rutasCandidatasDelCliente,
   type ClientePrismaCeiba,
 } from '../src/platform/persistence/prisma/prisma-client.ts';
+import { ServicioDeFicheros } from '../src/modules/file/file.service.ts';
 import { StudioService } from '../src/modules/studio/studio-core.service.ts';
 import type { StudioCollaborationService } from '../src/modules/studio/studio-collab.service.ts';
 
@@ -227,6 +228,22 @@ function auditoriaDePega(): ServicioDeAuditoria {
   return { registrar: () => undefined } as unknown as ServicioDeAuditoria;
 }
 
+/**
+ * Doble del servicio de ficheros (darkware, fase 7).
+ *
+ * `StudioService` lo recibe desde que la ejecución construye el cuerpo con
+ * `construirCuerpoParaElMotor`: `multipart_form_data` y `binary_file`
+ * necesitan los BYTES de los adjuntos, y el único sitio de donde salen es
+ * `bytesEnBase64`. Esta prueba no ejercita adjuntos —comprueba la FORMA del
+ * mensaje al motor— así que el doble devuelve siempre `null`: «ese fichero no
+ * existe», que es justo lo que el adaptador sabe tratar.
+ */
+function ficherosDePega(): ServicioDeFicheros {
+  return {
+    bytesEnBase64: async () => null,
+  } as unknown as ServicioDeFicheros;
+}
+
 const PRINCIPAL: Principal = {
   tipo: 'usuario',
   usuarioId: 'usuario-1',
@@ -265,6 +282,7 @@ describe('studio — contrato con el motor HTTP y traducción de su respuesta', 
       config,
       colaboracionDePega(),
       auditoriaDePega(),
+      ficherosDePega(),
     );
   });
 

@@ -1088,6 +1088,12 @@ describe('F6 · las 7 rutas contra PostgreSQL real', () => {
   });
 
   it('el cuerpo de formulario se guarda en request_body_fields, no en raw_content', async () => {
+    // ACTUALIZADO EN LA FASE 7. Hasta la fase 6 el contenido de un formulario
+    // viajaba como texto urlencoded en `body`. El §2.1 del BRIEF-FASE7 lo
+    // cambia: el contenido va en `bodyFields`, y mandar `body` con un
+    // `bodyType` de formulario es **422, no un silencio**. Lo que esta prueba
+    // afirma —que `raw_content` queda NULL y el contenido se desgrana en
+    // `request_body_fields`— no ha cambiado; sólo la puerta de entrada.
     const creada = await pedir(entorno, {
       method: 'POST',
       url: `/api/v1/collections/${coleccionId}/requests`,
@@ -1096,7 +1102,10 @@ describe('F6 · las 7 rutas contra PostgreSQL real', () => {
         method: 'POST',
         url: 'https://x.test/form',
         bodyType: 'form_urlencoded',
-        body: 'grant_type=client_credentials&scope=lectura',
+        bodyFields: [
+          { key: 'grant_type', kind: 'text', value: 'client_credentials' },
+          { key: 'scope', kind: 'text', value: 'lectura' },
+        ],
       },
       cookies: duena.cookies,
       csrf: duena.csrf,
@@ -1128,17 +1137,36 @@ describe('F6 · las 7 rutas contra PostgreSQL real', () => {
     );
   });
 
-  it('`binary_file` y `custom` se rechazan con 422 en vez de romper el CHECK del motor', async () => {
-    for (const modo of ['binary_file', 'custom']) {
-      const respuesta = await pedir(entorno, {
-        method: 'POST',
-        url: `/api/v1/collections/${coleccionId}/requests`,
-        payload: { name: `Modo ${modo}`, url: 'https://x.test', bodyType: modo },
-        cookies: duena.cookies,
-        csrf: duena.csrf,
-      });
-      assert.equal(respuesta.statusCode, 422, `${modo} → ${respuesta.body}`);
-    }
+  it('`binary_file` sin fichero sigue siendo 422; `custom` ya se acepta (cambio de la fase 7)', async () => {
+    // ACTUALIZADO EN LA FASE 7. La fase 6 rechazaba los dos modos porque no
+    // había subida de ficheros y `custom` no tenía forma definida. El §2.1 del
+    // BRIEF-FASE7 abre los dos:
+    //  - `binary_file` **con** `binaryFileId` se guarda; **sin** él sigue
+    //    siendo 422, que es lo que esta prueba defendía de verdad: que el
+    //    CHECK del motor no reviente con un 500.
+    //  - `custom` se guarda con `raw_content` y `binary_file_id` a NULL, que
+    //    es la única forma que `ck_body_mode_shape` le permite.
+    const sinFichero = await pedir(entorno, {
+      method: 'POST',
+      url: `/api/v1/collections/${coleccionId}/requests`,
+      payload: { name: 'Modo binary_file', url: 'https://x.test', bodyType: 'binary_file' },
+      cookies: duena.cookies,
+      csrf: duena.csrf,
+    });
+    assert.equal(sinFichero.statusCode, 422, sinFichero.body);
+
+    const custom = await pedir(entorno, {
+      method: 'POST',
+      url: `/api/v1/collections/${coleccionId}/requests`,
+      payload: { name: 'Modo custom', url: 'https://x.test', bodyType: 'custom' },
+      cookies: duena.cookies,
+      csrf: duena.csrf,
+    });
+    assert.equal(custom.statusCode, 201, custom.body);
+    assert.equal(
+      (custom.json() as { request: { bodyType: string } }).request.bodyType,
+      'custom',
+    );
   });
 });
 

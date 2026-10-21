@@ -16,6 +16,10 @@ import {
   type ServicioDeAuditoria,
 } from '../../platform/audit/ports.js';
 import {
+  CONFIGURACION_APP,
+  type ConfiguracionDeApp as ConfigAplicacion,
+} from '../../platform/config/app-config.js';
+import {
   aBytesDePrisma,
   idDeUsuario,
   type Principal as PrincipalAutenticado,
@@ -29,6 +33,33 @@ import {
 import { PrismaClientService as ClientePrisma } from '../../platform/persistence/prisma/prisma-client.js';
 
 export type RolColaboracion = 'owner' | 'admin' | 'editor' | 'executor' | 'viewer';
+
+/**
+ * Buzon ficticio de las invitaciones SIN destinatario (los «enlaces
+ * compartidos»). `invitations.email` es NOT NULL, asi que una invitacion que no
+ * va dirigida a nadie necesita igualmente un valor.
+ */
+const BUZON_DE_ENLACE = 'enlace-compartido@ceiba.local';
+const DOMINIO_DE_ENLACE = '@ceiba.local';
+const LOCAL_DE_ENLACE = 'enlace-compartido';
+
+/** ¿Es el correo de una invitacion por enlace (con o sin sufijo unico)? */
+export function esBuzonDeEnlace(email: string): boolean {
+  const normalizado = email.trim().toLowerCase();
+  return (
+    normalizado === BUZON_DE_ENLACE ||
+    (normalizado.startsWith(`${LOCAL_DE_ENLACE}+`) && normalizado.endsWith(DOMINIO_DE_ENLACE))
+  );
+}
+
+/** Codigo de violacion de restriccion unica de Prisma. */
+function esViolacionDeUnicidad(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { code?: unknown }).code === 'P2002'
+  );
+}
 
 const JERARQUIA_ROLES: Record<RolColaboracion, number> = {
   viewer: 10,
@@ -44,7 +75,23 @@ export class StudioCollaborationService {
     @Inject(CLIENTE_PRISMA) private readonly prisma: ClientePrisma,
     @Inject(SERVICIO_DE_AUDITORIA)
     private readonly auditoria: ServicioDeAuditoria,
+    @Inject(CONFIGURACION_APP) private readonly config: ConfigAplicacion,
   ) {}
+
+  /**
+   * Convierte una ruta relativa en la URL ABSOLUTA que se pega en un chat.
+   *
+   * Se compone en el SERVIDOR, con `CEIBA_PUBLIC_URL`, y no en el navegador.
+   * Hasta hoy la web la fabricaba con `window.location.origin`
+   * (`apps/web/src/api/studio.ts:760`), que es el origen desde el que mira
+   * QUIEN INVITA: detras de un proxy, en un tunel o en un despliegue con dos
+   * nombres, ese origen puede no ser el que funciona para quien recibe el
+   * enlace. `CEIBA_PUBLIC_URL` es, por definicion del ADR-0009 §6.3, el origen
+   * unico y publico del producto.
+   */
+  #urlAbsoluta(ruta: string): string {
+    return `${this.config.urlPublica.replace(/\/+$/u, '')}${ruta}`;
+  }
 
   async verificarRolMinimo(
     workspaceId: string,
@@ -187,6 +234,11 @@ export class StudioCollaborationService {
       id: inv.id,
       workspaceId: inv.workspaceId,
       email: inv.email,
+      // Un enlace sin destinatario lleva un buzon ficticio con etiqueta unica
+      // (`enlace-compartido+<selector>@ceiba.local`). La interfaz NO debe
+      // ensenarlo como si fuera el correo de alguien: con esta bandera pinta
+      // «Enlace compartido» y deja de inventarse la deteccion por su cuenta.
+      esEnlace: esBuzonDeEnlace(inv.email),
       role: inv.role as RolColaboracion,
       modeLabel: inv.role === 'viewer' ? 'Solo mostrar (Lectura)' : 'Mostrar y editar (Colaborador)',
       status: inv.status,
@@ -204,7 +256,8 @@ export class StudioCollaborationService {
   ) {
     const { workspace } = await this.verificarRolMinimo(workspaceId, principal, 'admin');
 
-    const emailLimpio = (input.email?.trim().toLowerCase() || 'enlace-compartido@ceiba.local');
+    const correoPedido = input.email?.trim().toLowerCase() ?? '';
+    const esEnlaceSinDestinatario = correoPedido === '';
     const rolAsignado = input.role || 'viewer';
     const dias = Math.min(Math.max(input.expiresInDays ?? 7, 1), 30);
 
@@ -222,18 +275,51 @@ export class StudioCollaborationService {
     const rawToken = `${selector}.${verificador}`;
     const expiresAt = new Date(Date.now() + dias * 24 * 60 * 60 * 1000);
 
-    const creada = await this.prisma.client.invitation.create({
-      data: {
-        workspaceId,
-        email: emailLimpio,
-        role: rolAsignado,
-        tokenSelector: selector,
-        tokenVerifierHash: aBytesDePrisma(hashearVerificador(verificador)),
-        invitedByUserId: idDeUsuario(principal),
-        status: 'pending',
-        expiresAt,
-      },
-    });
+    // ─────────────────────────────────────────────────────────────────────
+    // BUZON UNICO POR ENLACE. Sin esto solo existe UN enlace por workspace.
+    //
+    // `invitations.email` es NOT NULL, asi que una invitacion sin
+    // destinatario necesita igualmente un valor. Usar siempre el mismo
+    // (`enlace-compartido@ceiba.local`) choca con el indice parcial
+    // `uq_invitation_pending` — UNIQUE (workspace_id, email) WHERE
+    // status = 'pending', migracion 20261014193100 L129-131 —: el SEGUNDO
+    // enlace vivo del mismo workspace reventaba con P2002 y salia un 500
+    // con cuerpo vacio. Medido: la primera llamada 201, la siguiente 500.
+    //
+    // La etiqueta `+<selector>` mantiene el buzon reconocible
+    // (`esBuzonDeEnlace`) y lo hace unico por enlace. El selector ya es
+    // aleatorio y ya viaja en la fila, asi que no anade ningun secreto.
+    // ─────────────────────────────────────────────────────────────────────
+    const emailLimpio = esEnlaceSinDestinatario
+      ? `${LOCAL_DE_ENLACE}+${selector.toLowerCase()}${DOMINIO_DE_ENLACE}`
+      : correoPedido;
+
+    let creada;
+    try {
+      creada = await this.prisma.client.invitation.create({
+        data: {
+          workspaceId,
+          email: emailLimpio,
+          role: rolAsignado,
+          tokenSelector: selector,
+          tokenVerifierHash: aBytesDePrisma(hashearVerificador(verificador)),
+          invitedByUserId: idDeUsuario(principal),
+          status: 'pending',
+          expiresAt,
+        },
+      });
+    } catch (error) {
+      // Invitar DOS VECES al mismo correo con una viva es un conflicto de
+      // estado del cliente (409), no un fallo del servidor (500). El indice
+      // parcial permite reinvitar en cuanto la anterior se revoca o caduca,
+      // y eso es justo lo que hay que decirle a quien invita.
+      if (esViolacionDeUnicidad(error)) {
+        throw new ErrorConflicto(
+          `Ya hay una invitación pendiente para «${emailLimpio}» en este workspace. Revócala o espera a que caduque antes de crear otra.`,
+        );
+      }
+      throw error;
+    }
 
     await this.auditoria.registrar({
       accion: ACCION_AUDITORIA.INVITACION_CREADA,
@@ -259,7 +345,11 @@ export class StudioCollaborationService {
       status: creada.status,
       expiresAt: creada.expiresAt.toISOString(),
       inviteToken: rawToken,
+      // `invitePath` se CONSERVA tal cual (relativo) por si algun consumidor lo
+      // leyera: el §3.B.3 del brief lo pide expresamente. `inviteUrl` es el
+      // campo nuevo y es el que hay que pegar en un chat.
       invitePath: `/invitacion/${rawToken}`,
+      inviteUrl: this.#urlAbsoluta(`/invitacion/${rawToken}`),
     };
   }
 

@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ModuloDePlataforma } from './platform/platform.module.ts';
 import { GUARDS_GLOBALES_DE_LA_RAIZ } from './root-guards.ts';
 import { ModuloDeColecciones } from './modules/collection/collection.public.ts';
+import { ModuloDeFicheros } from './modules/file/file.public.ts';
 import { ModuloDeIdentidad } from './modules/identity/identity.public.ts';
 import { ModuloDePeticiones } from './modules/request/request.public.ts';
 import { ModuloDeComparticion } from './modules/sharing/sharing.public.ts';
@@ -13,6 +14,7 @@ import { ModuloDeWorkspaces } from './modules/workspace/workspace.public.ts';
     ModuloDePlataforma.forRoot(),
     ModuloDeColecciones,
     ModuloDePeticiones,
+    ModuloDeFicheros,
     ModuloDeIdentidad,
     ModuloDeWorkspaces,
     ModuloDeComparticion,
