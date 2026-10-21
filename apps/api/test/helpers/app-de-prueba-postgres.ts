@@ -7,6 +7,7 @@ import { ModuloDeColecciones } from '../../src/modules/collection/collection.pub
 import { ModuloDeIdentidad } from '../../src/modules/identity/identity.public.ts';
 import { ModuloDeWorkspaces } from '../../src/modules/workspace/workspace.public.ts';
 import { ModuloDeComparticion } from '../../src/modules/sharing/sharing.public.ts';
+import { ModuloDePeticiones } from '../../src/modules/request/request.public.ts';
 import { GUARDS_GLOBALES_DE_LA_RAIZ } from '../../src/root-guards.ts';
 import {
   CONFIGURACION_APP,
@@ -82,6 +83,7 @@ export async function crearAppDePruebaPostgres(
     imports: [
       ModuloDePlataforma.forRoot(entorno),
       ModuloDeColecciones,
+      ModuloDePeticiones,
       ModuloDeIdentidad,
       ModuloDeWorkspaces,
       ModuloDeComparticion,
