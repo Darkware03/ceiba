@@ -1,24 +1,12 @@
-import { Injectable, Logger } from '@nestjs/common';
-import type { EventoDeAuditoria, PuertoDeAuditoria } from './ports.ts';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import {
+  CLIENTE_PRISMA,
+  type InstanciaClientePrisma,
+} from '../persistence/prisma/prisma-client.js';
+import type { EventoDeAuditoria, PuertoDeAuditoria } from './ports.js';
 
-/**
- * Sumidero de auditoría de esta ronda.
- *
- * **Lo que hace:** valida la forma del verbo contra el `CHECK` de `audit_logs`,
- * filtra las claves prohibidas de `metadata` y lo escribe al log estructurado.
- * **Lo que NO hace:** escribir en la tabla `audit_logs`. No hay PostgreSQL en
- * este contenedor y el módulo `audit` con su repositorio Prisma es trabajo de
- * la rebanada siguiente. No se simula una escritura que no ocurre.
- */
-
-/** El mismo patrón del `CHECK (action ~ ...)` de `audit_logs`. */
 const PATRON_ACCION = /^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/u;
 
-/**
- * Claves que NUNCA pueden viajar en `metadata` (ADR-0009 §10). La lista se
- * aplica por coincidencia de subcadena sobre el nombre de la clave, en
- * minúsculas: es deliberadamente agresiva.
- */
 const CLAVES_PROHIBIDAS = [
   'password',
   'contrasena',
@@ -37,42 +25,99 @@ const CLAVES_PROHIBIDAS = [
 export class SumideroDeAuditoriaEnLog implements PuertoDeAuditoria {
   readonly #log = new Logger('audit');
   readonly #registrados: EventoDeAuditoria[] = [];
+  readonly #prisma: InstanciaClientePrisma | null;
+
+  constructor(@Optional() @Inject(CLIENTE_PRISMA) prisma?: any) {
+    this.#prisma = prisma ?? null;
+  }
 
   registrar(evento: EventoDeAuditoria): void {
-    if (!PATRON_ACCION.test(evento.accion)) {
-      // Rechazar aquí es preferible a que PostgreSQL rechace la fila más tarde.
-      this.#log.error(`verbo de auditoría inválido: ${evento.accion}`);
+    const accion = evento.accion ?? evento.action ?? 'studio.event';
+    if (!PATRON_ACCION.test(accion)) {
+      this.#log.error(`verbo de auditoría inválido: ${accion}`);
       return;
     }
+    const recursoTipo = evento.recursoTipo ?? evento.resource?.type ?? 'workspace';
+    const recursoId = evento.recursoId ?? evento.resource?.id ?? null;
+    const rawMeta = evento.metadata ?? evento.detalles ?? evento.details;
+    const metadataSaneada = sanearMetadata(rawMeta);
+
     const saneado: EventoDeAuditoria = {
       ...evento,
-      metadata: sanearMetadata(evento.metadata),
+      accion,
+      recursoTipo,
+      recursoId,
+      metadata: metadataSaneada,
     };
     this.#registrados.push(saneado);
     this.#log.log(
       JSON.stringify({
-        accion: saneado.accion,
-        actorUserId: saneado.actorUserId,
-        sessionId: saneado.sessionId,
-        workspaceId: saneado.workspaceId,
-        recursoTipo: saneado.recursoTipo,
-        recursoId: saneado.recursoId,
-        metadata: saneado.metadata,
+        accion,
+        actorUserId: saneado.actorUserId ?? null,
+        sessionId: saneado.sessionId ?? null,
+        workspaceId: saneado.workspaceId ?? null,
+        recursoTipo,
+        recursoId,
+        metadata: metadataSaneada,
       }),
     );
+
+    if (this.#prisma) {
+      void this.#persistirEnBaseDeDatos(saneado, accion, recursoTipo, recursoId, metadataSaneada);
+    }
   }
 
-  /** Sólo para aserciones de prueba. */
+  async #persistirEnBaseDeDatos(
+    evento: EventoDeAuditoria,
+    accion: string,
+    recursoTipo: string,
+    recursoId: string | null,
+    metadata: Record<string, unknown> | undefined,
+  ): Promise<void> {
+    if (!this.#prisma) return;
+    try {
+      let actorEmail = evento.actorEmail ?? null;
+      if (!actorEmail && evento.actorUserId) {
+        const u = await this.#prisma.user.findUnique({
+          where: { id: evento.actorUserId },
+          select: { email: true },
+        });
+        actorEmail = u?.email ?? null;
+      }
+      await this.#prisma.auditLog.create({
+        data: {
+          
+          
+          
+          action: accion,
+          resourceType: recursoTipo,
+          targetType: (recursoTipo === 'auth' || recursoTipo === 'user' || recursoTipo === 'session') ? 'user' : (recursoTipo as any),
+          resourceId: recursoId,
+          outcome: evento.resultado ?? evento.outcome ?? 'success',
+          ipAddress: evento.clientIp ?? null,
+          userAgent: evento.userAgent ?? null,
+          metadata: (metadata ?? undefined) as never,
+        },
+      });
+    } catch (err) {
+      this.#log.warn(
+        `No se pudo persistir evento de auditoría (${accion}): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
   eventos(): readonly EventoDeAuditoria[] {
     return this.#registrados;
   }
 }
 
+export { SumideroDeAuditoriaEnLog as ServicioDeAuditoriaEnLog };
+
 export function sanearMetadata(
-  metadata: EventoDeAuditoria['metadata'],
-): EventoDeAuditoria['metadata'] {
+  metadata: Readonly<Record<string, unknown>> | undefined,
+): Record<string, unknown> | undefined {
   if (metadata === undefined) return undefined;
-  const salida: Record<string, string | number | boolean | null> = {};
+  const salida: Record<string, unknown> = {};
   for (const [clave, valor] of Object.entries(metadata)) {
     const normalizada = clave.toLowerCase();
     if (CLAVES_PROHIBIDAS.some((prohibida) => normalizada.includes(prohibida))) {

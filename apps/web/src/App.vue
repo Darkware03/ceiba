@@ -20,7 +20,7 @@ import { usarAlmacenDeSesion } from '@/stores/sesion';
 const ruta = useRoute();
 const sesion = usarAlmacenDeSesion();
 
-const esPublica = computed(() => ruta.meta.requiereSesion === false);
+const esPublica = computed(() => ruta.meta.publica === true);
 
 /** Sólo mientras no se sabe todavía si hay sesión y la ruta la necesita. */
 const comprobandoSesion = computed(() => !sesion.comprobada && !esPublica.value);

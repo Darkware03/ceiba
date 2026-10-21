@@ -1,92 +1,162 @@
 <script setup lang="ts">
-/**
- * Navegación lateral (§18).
- *
- * La §18 enumera nueve destinos (workspaces, colecciones, carpetas, historial,
- * entornos, ejecuciones, documentación, importar, configuración) y **a la vez**
- * exige: «No muestres botones que no tengan funcionalidad implementada. Si una
- * función está pendiente, identifícala claramente en la interfaz».
- *
- * Las dos cosas se cumplen así: lo implementado es un enlace de verdad; lo que
- * aún no existe aparece como entrada **inerte**, con `aria-disabled` y la
- * etiqueta «pendiente» visible. No hay ningún control que parezca funcionar y
- * no haga nada, que es exactamente lo que la regla prohíbe.
- */
-import { RUTA_CONSTRUCTOR, RUTA_WORKSPACES } from '@/router/nombres';
+import { computed } from 'vue'
+import { RouterLink, useRoute } from 'vue-router'
+import { NOMBRES_RUTAS } from '@/router/nombres'
+import { useWorkspacesStore } from '@/stores/workspaces'
 
-interface Destino {
-  readonly clave: string;
-  readonly etiqueta: string;
-  readonly ruta?: string;
-  readonly icono: string;
+const ruta = useRoute()
+const storeWorkspaces = useWorkspacesStore()
+
+const workspaceActivo = computed(() => storeWorkspaces.activo)
+
+interface ElementoNav {
+  etiqueta: string
+  nombreRuta: string
+  activo: boolean
 }
 
-/** Implementado y navegable en esta ronda. */
-const disponibles: readonly Destino[] = [
-  { clave: 'workspaces', etiqueta: 'Workspaces', ruta: RUTA_WORKSPACES, icono: 'M3 7h18M3 12h18M3 17h18' },
+const elementosPrincipales = computed<ElementoNav[]>(() => [
   {
-    clave: 'constructor',
-    etiqueta: 'Constructor',
-    ruta: RUTA_CONSTRUCTOR,
-    icono: 'M4 12h6m4 0h6M9 7l-5 5 5 5m6-10 5 5-5 5',
+    etiqueta: 'Espacios de trabajo',
+    nombreRuta: NOMBRES_RUTAS.WORKSPACES,
+    activo:
+      ruta.name === NOMBRES_RUTAS.WORKSPACES ||
+      ruta.name === NOMBRES_RUTAS.WORKSPACE_DETALLE,
   },
-];
+  {
+    etiqueta: 'Constructor HTTP',
+    nombreRuta: NOMBRES_RUTAS.CONSTRUCTOR,
+    activo: ruta.name === NOMBRES_RUTAS.CONSTRUCTOR,
+  },
+])
 
-/** Declarado en la §18, **todavía no implementado**. Ver FRONTEND.md. */
-const pendientes: readonly Destino[] = [
-  { clave: 'historial', etiqueta: 'Historial', icono: 'M12 7v5l3 2M3 12a9 9 0 1 0 2.6-6.4M3 4v4h4' },
-  { clave: 'entornos', etiqueta: 'Entornos', icono: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18ZM3 12h18M12 3c3 3.5 3 14 0 18' },
-  { clave: 'ejecuciones', etiqueta: 'Ejecuciones', icono: 'M8 5l11 7-11 7V5Z' },
-  { clave: 'documentacion', etiqueta: 'Documentación', icono: 'M5 4h10l4 4v12H5V4ZM15 4v4h4M8 13h8M8 17h5' },
-  { clave: 'importar', etiqueta: 'Importar', icono: 'M12 4v10m0 0 4-4m-4 4-4-4M4 19h16' },
-  { clave: 'configuracion', etiqueta: 'Configuración', icono: 'M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4ZM4.2 12l-1.4-2.2 1.6-2.8 2.5.5 1.9-1.1L9.4 3.6h5.2l.6 2.8 1.9 1.1 2.5-.5 1.6 2.8L19.8 12l1.4 2.2-1.6 2.8-2.5-.5-1.9 1.1-.6 2.8H9.4l-.6-2.8-1.9-1.1-2.5.5-1.6-2.8L4.2 12Z' },
-];
+const modulosPlataforma = computed<ElementoNav[]>(() => [
+  {
+    etiqueta: 'Historial',
+    nombreRuta: NOMBRES_RUTAS.HISTORIAL,
+    activo: ruta.name === NOMBRES_RUTAS.HISTORIAL,
+  },
+  {
+    etiqueta: 'Entornos',
+    nombreRuta: NOMBRES_RUTAS.ENTORNOS,
+    activo: ruta.name === NOMBRES_RUTAS.ENTORNOS,
+  },
+  {
+    etiqueta: 'Ejecuciones',
+    nombreRuta: NOMBRES_RUTAS.EJECUCIONES,
+    activo: ruta.name === NOMBRES_RUTAS.EJECUCIONES,
+  },
+  {
+    etiqueta: 'Documentación',
+    nombreRuta: NOMBRES_RUTAS.DOCUMENTACION,
+    activo: ruta.name === NOMBRES_RUTAS.DOCUMENTACION,
+  },
+  {
+    etiqueta: 'Importar / Exportar',
+    nombreRuta: NOMBRES_RUTAS.IMPORTAR,
+    activo: ruta.name === NOMBRES_RUTAS.IMPORTAR,
+  },
+  {
+    etiqueta: 'Configuración y Colaboración',
+    nombreRuta: NOMBRES_RUTAS.CONFIGURACION,
+    activo: ruta.name === NOMBRES_RUTAS.CONFIGURACION,
+  },
+])
 </script>
 
 <template>
-  <nav class="lateral" aria-label="Navegación principal">
-    <ul class="lateral__lista">
-      <li v-for="destino in disponibles" :key="destino.clave">
-        <RouterLink class="lateral__enlace" :to="{ name: destino.ruta }">
-          <svg class="lateral__icono" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-               stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path :d="destino.icono" />
-          </svg>
-          <span>{{ destino.etiqueta }}</span>
-        </RouterLink>
-      </li>
-    </ul>
+  <aside class="barra-lateral" aria-label="Navegación principal">
+    <div class="barra-lateral__seccion">
+      <h2 class="barra-lateral__titulo">Navegación</h2>
+      <ul class="barra-lateral__lista">
+        <li v-for="item in elementosPrincipales" :key="item.nombreRuta">
+          <RouterLink
+            :to="{ name: item.nombreRuta }"
+            class="barra-lateral__enlace"
+            :class="{ 'barra-lateral__enlace--activo': item.activo }"
+          >
+            <span class="barra-lateral__indicador" aria-hidden="true"></span>
+            <span>{{ item.etiqueta }}</span>
+          </RouterLink>
+        </li>
+      </ul>
+    </div>
 
-    <p class="lateral__rotulo">Pendiente en esta versión</p>
-    <ul class="lateral__lista">
-      <li v-for="destino in pendientes" :key="destino.clave">
-        <span class="lateral__enlace lateral__enlace--inerte" aria-disabled="true">
-          <svg class="lateral__icono" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-               stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path :d="destino.icono" />
-          </svg>
-          <span>{{ destino.etiqueta }}</span>
-          <span class="lateral__marca">pendiente</span>
+    <div v-if="workspaceActivo" class="barra-lateral__seccion">
+      <h2 class="barra-lateral__titulo">Workspace activo</h2>
+      <RouterLink
+        :to="{
+          name: NOMBRES_RUTAS.WORKSPACE_DETALLE,
+          params: { workspaceId: workspaceActivo.id },
+        }"
+        class="barra-lateral__workspace"
+      >
+        <span class="barra-lateral__ws-inicial" aria-hidden="true">
+          {{ workspaceActivo.name.charAt(0).toUpperCase() }}
         </span>
-      </li>
-    </ul>
-  </nav>
+        <span class="barra-lateral__ws-texto">
+          <span class="barra-lateral__ws-nombre">{{ workspaceActivo.name }}</span>
+          <span class="barra-lateral__ws-slug">
+            {{ workspaceActivo.slug }} · {{ workspaceActivo.myRole === 'viewer' ? 'Solo mostrar' : (workspaceActivo.myRole ?? 'editor') }}
+          </span>
+        </span>
+      </RouterLink>
+    </div>
+
+    <div class="barra-lateral__seccion barra-lateral__seccion--modulos">
+      <h2 class="barra-lateral__titulo">Módulos del Estudio</h2>
+      <ul class="barra-lateral__lista">
+        <li v-for="mod in modulosPlataforma" :key="mod.nombreRuta">
+          <RouterLink
+            :to="{ name: mod.nombreRuta }"
+            class="barra-lateral__enlace"
+            :class="{ 'barra-lateral__enlace--activo': mod.activo }"
+          >
+            <span class="barra-lateral__indicador" aria-hidden="true"></span>
+            <span>{{ mod.etiqueta }}</span>
+          </RouterLink>
+        </li>
+      </ul>
+    </div>
+  </aside>
 </template>
 
 <style scoped>
-.lateral {
+.barra-lateral {
+  width: 248px;
+  flex-shrink: 0;
+  background-color: var(--color-superficie-1);
+  border-right: 1px solid var(--color-borde-sutil);
+  padding: var(--espacio-4) var(--espacio-3);
   display: flex;
   flex-direction: column;
-  gap: var(--ceiba-space-2);
-  padding: var(--ceiba-space-3);
-  width: 232px;
-  flex: none;
-  border-right: 1px solid var(--ceiba-border);
-  background: var(--ceiba-bg-sunken);
+  gap: var(--espacio-6);
   overflow-y: auto;
 }
 
-.lateral__lista {
+.barra-lateral__seccion {
+  display: flex;
+  flex-direction: column;
+  gap: var(--espacio-2);
+}
+
+.barra-lateral__seccion--modulos {
+  margin-top: auto;
+  padding-top: var(--espacio-4);
+  border-top: 1px solid var(--color-borde-sutil);
+}
+
+.barra-lateral__titulo {
+  margin: 0;
+  padding: 0 var(--espacio-2);
+  font-size: var(--tamano-xs);
+  font-weight: var(--peso-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-texto-atenuado);
+}
+
+.barra-lateral__lista {
   list-style: none;
   margin: 0;
   padding: 0;
@@ -95,69 +165,96 @@ const pendientes: readonly Destino[] = [
   gap: 2px;
 }
 
-.lateral__enlace {
+.barra-lateral__enlace {
   display: flex;
   align-items: center;
-  gap: var(--ceiba-space-3);
-  padding: var(--ceiba-space-2) var(--ceiba-space-3);
-  border-radius: var(--ceiba-radius-md);
-  color: var(--ceiba-text-muted);
-  font-size: var(--ceiba-text-md);
+  gap: var(--espacio-2);
+  padding: var(--espacio-2) var(--espacio-3);
+  border-radius: var(--radio-md);
+  color: var(--color-texto-secundario);
+  font-size: var(--tamano-sm);
+  font-weight: var(--peso-medio);
+  text-decoration: none;
+  transition:
+    background-color var(--transicion-rapida),
+    color var(--transicion-rapida);
+}
+
+.barra-lateral__enlace:hover {
+  background-color: var(--color-superficie-2);
+  color: var(--color-texto-primario);
   text-decoration: none;
 }
 
-.lateral__enlace:hover {
-  background: var(--ceiba-surface-overlay);
-  color: var(--ceiba-text);
+.barra-lateral__enlace--activo {
+  background-color: var(--color-superficie-2);
+  color: var(--color-texto-primario);
+  font-weight: var(--peso-semibold);
+}
+
+.barra-lateral__indicador {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background-color: transparent;
+  transition: background-color var(--transicion-rapida);
+}
+
+.barra-lateral__enlace--activo .barra-lateral__indicador {
+  background-color: var(--color-acento-primario);
+}
+
+.barra-lateral__workspace {
+  display: flex;
+  align-items: center;
+  gap: var(--espacio-3);
+  padding: var(--espacio-2) var(--espacio-3);
+  border-radius: var(--radio-md);
+  background-color: var(--color-superficie-2);
+  border: 1px solid var(--color-borde-sutil);
+  text-decoration: none;
+  color: var(--color-texto-primario);
+}
+
+.barra-lateral__workspace:hover {
+  border-color: var(--color-borde-fuerte);
   text-decoration: none;
 }
 
-.lateral__enlace.router-link-active {
-  background: var(--ceiba-accent-surface);
-  color: var(--ceiba-accent-strong);
+.barra-lateral__ws-inicial {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radio-sm);
+  background-color: var(--color-acento-primario);
+  color: var(--color-texto-sobre-acento);
+  font-weight: var(--peso-bold);
+  font-size: var(--tamano-sm);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
 }
 
-.lateral__enlace--inerte {
-  color: var(--ceiba-text-faint);
-  cursor: not-allowed;
+.barra-lateral__ws-texto {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
 }
 
-.lateral__enlace--inerte:hover {
-  background: transparent;
-  color: var(--ceiba-text-faint);
+.barra-lateral__ws-nombre {
+  font-size: var(--tamano-sm);
+  font-weight: var(--peso-semibold);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.lateral__icono {
-  width: 17px;
-  height: 17px;
-  flex: none;
-}
-
-.lateral__marca {
-  margin-left: auto;
-  font-size: 0.625rem;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--ceiba-text-faint);
-  border: 1px solid var(--ceiba-border);
-  border-radius: var(--ceiba-radius-pill);
-  padding: 1px 6px;
-}
-
-.lateral__rotulo {
-  margin-top: var(--ceiba-space-4);
-  padding: 0 var(--ceiba-space-3);
-  font-size: var(--ceiba-text-xs);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--ceiba-text-faint);
-}
-
-@media (max-width: 860px) {
-  .lateral {
-    width: 100%;
-    border-right: 0;
-    border-bottom: 1px solid var(--ceiba-border);
-  }
+.barra-lateral__ws-slug {
+  font-size: var(--tamano-xs);
+  font-family: var(--fuente-mono);
+  color: var(--color-texto-atenuado);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 </style>

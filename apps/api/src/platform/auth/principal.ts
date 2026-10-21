@@ -8,6 +8,9 @@ export interface PrincipalUsuario {
   readonly tipo: 'usuario';
   readonly usuarioId: string;
   readonly sesionId: string;
+  readonly userId?: string;
+  readonly email?: string;
+  readonly esPlatformAdmin?: boolean;
 }
 
 /*
@@ -39,3 +42,5 @@ export interface ContextoDePeticion {
   readonly ip: string;
   readonly userAgent: string | undefined;
 }
+
+export type PrincipalAutenticado = PrincipalUsuario;

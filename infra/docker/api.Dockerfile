@@ -44,26 +44,15 @@ FROM base AS build
 
 # corepack toma la versión de pnpm del campo `packageManager` de la raíz, para
 # que la imagen no se desincronice del repositorio cuando esa versión cambie.
-COPY package.json ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY apps/api/package.json ./apps/api/
+COPY apps/engine/package.json ./apps/engine/
+COPY apps/web/package.json ./apps/web/
+COPY packages/brand/package.json ./packages/brand/
+COPY prisma/package.json ./prisma/
+COPY prisma/prisma.config.ts ./prisma/
+COPY prisma/schema ./prisma/schema
 RUN corepack enable && corepack prepare --activate && pnpm --version
-
-COPY . .
-
-# Diagnóstico temprano y legible. Al 2026-10-14 el árbol AÚN NO TIENE
-# `apps/api` ni `pnpm-lock.yaml` en la raíz, así que este build FALLA HOY, a
-# propósito y con un mensaje que dice por qué, en vez de con un error opaco de
-# pnpm cien líneas más abajo.
-RUN set -eu; \
-    missing=0; \
-    [ -f pnpm-lock.yaml ]      || { echo "FALTA pnpm-lock.yaml en la raiz del repositorio." >&2; missing=1; }; \
-    [ -f apps/api/package.json ] || { echo "FALTA apps/api/package.json: la API todavia no existe." >&2; missing=1; }; \
-    [ -d prisma/schema ]       || { echo "FALTA prisma/schema/." >&2; missing=1; }; \
-    [ "$missing" -eq 0 ] || { \
-      echo "" >&2; \
-      echo "Esta imagen no se puede construir todavia. Depende de trabajo de" >&2; \
-      echo "'backend-engineer' (apps/api) y de un lockfile en la raiz." >&2; \
-      echo "Ver DESPLIEGUE.md 3.4 y el riesgo R3." >&2; \
-      exit 1; }
 
 # `--frozen-lockfile` es deliberado: una imagen de producción no resuelve
 # versiones. Si el lockfile no está al día, el build debe fallar.
@@ -80,7 +69,9 @@ RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store,sharing=locked \
 RUN DATABASE_URL="postgresql://validacion:validacion@127.0.0.1:5432/validacion" \
     pnpm --filter ./prisma exec prisma generate --config ./prisma.config.ts
 
-RUN pnpm --filter "@ceiba/api..." run build
+COPY . .
+
+RUN rm -rf apps/api/dist && pnpm --filter "@ceiba/api..." run build
 
 # `pnpm deploy` produce un árbol autocontenido, sin enlaces simbólicos hacia el
 # almacén y sin devDependencies. El `||` cubre el cambio de semántica del flag
@@ -92,11 +83,8 @@ RUN cd /deploy/node_modules/@prisma \
  && ln -sf ../.pnpm/@prisma+client-runtime-utils@*/node_modules/@prisma/client-runtime-utils client-runtime-utils \
  && test -e /deploy/node_modules/@prisma/client-runtime-utils/package.json
 
-# El punto de entrada compilado de `apps/api` es `dist/main.js`
-# (ver `apps/api/package.json` → `"main": "dist/main.js"`).
-RUN test -f /deploy/dist/main.js \
- || { echo "No existe /deploy/dist/main.js. Ajusta el CMD al punto de entrada real" >&2; \
-      echo "de apps/api y avisa en DESPLIEGUE.md (HUECO H-D1)." >&2; \
+RUN test -f /deploy/dist/apps/api/src/main.js \
+ || { echo "No existe /deploy/dist/apps/api/src/main.js." >&2; \
       ls -la /deploy /deploy/dist >&2 2>/dev/null || true; exit 1; }
 
 # ---------------------------------------------------------------------------
@@ -129,4 +117,4 @@ HEALTHCHECK --interval=15s --timeout=5s --start-period=90s --retries=6 \
 
 # Sin shell: `node` es PID 1 y recibe SIGTERM directamente, que es lo que
 # permite un apagado ordenado. Con `init: true` en compose se reapean zombis.
-CMD ["node", "--enable-source-maps", "dist/main.js"]
+CMD ["node", "--enable-source-maps", "dist/apps/api/src/main.js"]

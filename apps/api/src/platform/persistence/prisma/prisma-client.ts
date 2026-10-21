@@ -217,5 +217,20 @@ export async function cargarClientePrisma(urlBaseDeDatos: string): Promise<Clien
     PrismaPg: new (config: { connectionString: string }) => unknown;
   };
   const adaptador = new PrismaPg({ connectionString: urlBaseDeDatos });
-  return new Constructor({ adapter: adaptador });
+  const instancia = new Constructor({ adapter: adaptador }) as ClientePrismaCeiba & {
+    client?: ClientePrismaCeiba;
+  };
+  instancia.client = instancia;
+  return instancia;
 }
+
+export type InstanciaClientePrisma = any;
+
+export class PrismaClientService {
+  readonly client!: InstanciaClientePrisma;
+  constructor(client: InstanciaClientePrisma) {
+    this.client = client;
+  }
+}
+
+

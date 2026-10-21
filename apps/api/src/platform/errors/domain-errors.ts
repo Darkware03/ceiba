@@ -88,3 +88,12 @@ export class DemasiadasPeticiones extends ErrorDeDominio {
     this.reintentarEnSegundos = Math.max(1, Math.ceil(reintentarEnSegundos));
   }
 }
+
+export {
+  EntradaInvalida as SolicitudInvalida,
+  EntradaInvalida as ReglaDeNegocioViolada,
+  EntradaInvalida as DatosDeEntradaInvalidos,
+  Prohibido as AccesoProhibido,
+  Conflicto as ConflictoDeEstado,
+};
+

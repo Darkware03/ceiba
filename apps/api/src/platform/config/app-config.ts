@@ -121,6 +121,11 @@ export interface ConfiguracionApp {
   readonly csrfSecret: string;
   readonly driverPersistencia: EntornoValidado['CEIBA_PERSISTENCE_DRIVER'];
   readonly databaseUrl: string | undefined;
+  readonly engine?: {
+    readonly url: string;
+    readonly token: string;
+    readonly timeoutMs: number;
+  };
 }
 
 export const CONFIGURACION_APP = Symbol('CONFIGURACION_APP');
@@ -252,5 +257,10 @@ export function cargarConfiguracion(entorno: NodeJS.ProcessEnv): ConfiguracionAp
     csrfSecret: env.CEIBA_CSRF_SECRET,
     driverPersistencia: env.CEIBA_PERSISTENCE_DRIVER,
     databaseUrl: env.DATABASE_URL,
+    engineUrl: process.env.CEIBA_ENGINE_URL ?? 'http://engine:3001',
+    engineToken: process.env.CEIBA_ENGINE_TOKEN ?? '',
+    engineTimeoutMs: Number(process.env.CEIBA_ENGINE_TIMEOUT_MS ?? 30000),
   });
 }
+
+export type ConfiguracionDeApp = ConfiguracionApp;

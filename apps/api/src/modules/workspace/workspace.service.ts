@@ -44,6 +44,7 @@ export class ServicioDeWorkspaces {
       recursoTipo: 'workspace',
       recursoId: workspace.id,
       clientIp: ip,
+      detalles: { name: workspace.name, slug: workspace.slug },
     });
     return workspace;
   }
@@ -74,6 +75,7 @@ export class ServicioDeWorkspaces {
       recursoTipo: 'workspace',
       recursoId: workspaceId,
       clientIp: ip,
+      detalles: { name: fila.name, cambios },
     });
     return fila;
   }

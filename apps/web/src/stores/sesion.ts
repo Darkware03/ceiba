@@ -184,3 +184,4 @@ export const usarAlmacenDeSesion = defineStore('sesion', {
     },
   },
 });
+export const usarAlmacenSesion = usarAlmacenDeSesion;

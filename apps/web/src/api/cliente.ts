@@ -160,3 +160,18 @@ export async function peticionApi<T>(
 
   return (await respuesta.json()) as T;
 }
+
+export const clienteApi = {
+  get: <T>(ruta: string, opciones: Omit<OpcionesDePeticion, 'metodo'> = {}) =>
+    peticionApi<T>(ruta, { ...opciones, metodo: 'GET' }),
+  post: <T>(ruta: string, cuerpo?: unknown, opciones: Omit<OpcionesDePeticion, 'metodo' | 'cuerpo'> = {}) =>
+    peticionApi<T>(ruta, { ...opciones, metodo: 'POST', cuerpo }),
+  put: <T>(ruta: string, cuerpo?: unknown, opciones: Omit<OpcionesDePeticion, 'metodo' | 'cuerpo'> = {}) =>
+    peticionApi<T>(ruta, { ...opciones, metodo: 'PUT', cuerpo }),
+  patch: <T>(ruta: string, cuerpo?: unknown, opciones: Omit<OpcionesDePeticion, 'metodo' | 'cuerpo'> = {}) =>
+    peticionApi<T>(ruta, { ...opciones, metodo: 'PATCH', cuerpo }),
+  delete: <T>(ruta: string, opciones: Omit<OpcionesDePeticion, 'metodo'> = {}) =>
+    peticionApi<T>(ruta, { ...opciones, metodo: 'DELETE' }),
+};
+
+export const clienteHttp = clienteApi;

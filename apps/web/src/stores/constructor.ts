@@ -111,7 +111,7 @@ export const usarAlmacenDeConstructor = defineStore(ID_DEL_ALMACEN, {
     cabeceras: [nuevoPar()],
     parametros: [nuevoPar()],
     cuerpo: cuerpoInicial(),
-    adaptador: 'navegador',
+    adaptador: 'motor',
     ejecutando: false,
     resultado: null,
     error: null,
@@ -209,6 +209,51 @@ export const usarAlmacenDeConstructor = defineStore(ID_DEL_ALMACEN, {
       this.historial = [];
     },
 
+    reiniciarBorrador(): void {
+      this.metodo = 'GET';
+      this.url = '';
+      this.cabeceras = [nuevoPar()];
+      this.parametros = [nuevoPar()];
+      this.cuerpo = cuerpoInicial();
+      this.resultado = null;
+      this.error = null;
+    },
+
+    cargarDesdePeticionGuardada(datos: {
+      workspaceId?: string;
+      collectionId?: string;
+      requestId?: string;
+      name?: string;
+      method: MetodoDeSolicitud;
+      url: string;
+      headers?: ReadonlyArray<{ key: string; value: string; enabled: boolean }>;
+      queryParams?: ReadonlyArray<{ key: string; value: string; enabled: boolean }>;
+      bodyType?: string;
+      body?: string | null;
+    }): void {
+      this.metodo = datos.method;
+      this.url = datos.url;
+      this.cabeceras =
+        datos.headers && datos.headers.length > 0
+          ? datos.headers.map((h) => nuevoPar(h.key, h.value, h.enabled))
+          : [nuevoPar()];
+      this.parametros =
+        datos.queryParams && datos.queryParams.length > 0
+          ? datos.queryParams.map((q) => nuevoPar(q.key, q.value, q.enabled))
+          : [nuevoPar()];
+      const modo =
+        datos.bodyType === 'json' || datos.bodyType === 'text' || datos.bodyType === 'form_urlencoded'
+          ? (datos.bodyType === 'form_urlencoded' ? 'text' : datos.bodyType)
+          : 'none';
+      this.cuerpo = {
+        modo,
+        contenido: datos.body ?? '',
+        tipoContenido: modo === 'json' ? 'application/json' : modo === 'text' ? 'text/plain' : null,
+      };
+      this.resultado = null;
+      this.error = null;
+    },
+
     /** Vuelve a cargar en el borrador una solicitud ya ejecutada. */
     recuperarDelHistorial(id: string): boolean {
       const entrada = this.historial.find((item) => item.id === id);
@@ -278,3 +323,7 @@ export const usarAlmacenDeConstructor = defineStore(ID_DEL_ALMACEN, {
     },
   },
 });
+
+export const useConstructorStore = usarAlmacenDeConstructor;
+
+export const usarAlmacenConstructor = usarAlmacenDeConstructor;

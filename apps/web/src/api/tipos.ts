@@ -33,6 +33,7 @@ export interface Workspace {
   readonly description: string | null;
   readonly ownerUserId: string;
   readonly status: string;
+  readonly myRole?: RolDeWorkspace | string;
   readonly createdAt: string;
   readonly updatedAt: string;
 }

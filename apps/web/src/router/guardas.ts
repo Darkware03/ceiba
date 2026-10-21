@@ -6,7 +6,7 @@ import { RUTA_LOGIN, RUTA_REGISTRO, RUTA_WORKSPACES } from './nombres';
  * Guard de navegación.
  *
  * **Deniega por omisión**: sólo pasa sin sesión la ruta que declara
- * explícitamente `meta.requiereSesion === false`. Una ruta nueva que se olvide
+ * explícitamente `meta.publica === true`. Una ruta nueva que se olvide
  * de declararlo queda protegida, no abierta.
  *
  * Tres comportamientos que el cliente pidió y que aquí quedan escritos:
@@ -56,7 +56,7 @@ export async function guardaDeSesion(
   await asegurarSesionComprobada();
   const sesion = usarAlmacenDeSesion();
 
-  const esPublica = hacia.meta.requiereSesion === false;
+  const esPublica = hacia.meta.publica === true;
 
   if (!esPublica && !sesion.autenticado) {
     return {

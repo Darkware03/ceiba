@@ -27,24 +27,18 @@ WORKDIR /app
 
 RUN node -e "const [M,m]=process.versions.node.split('.').map(Number); if (M<24 || (M===24 && m<15)) { console.error('Node '+process.versions.node+' < 24.15.0 exigido por engines.node'); process.exit(1) } console.log('node '+process.versions.node+' OK')"
 
-COPY package.json ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY apps/api/package.json ./apps/api/
+COPY apps/engine/package.json ./apps/engine/
+COPY apps/web/package.json ./apps/web/
+COPY packages/brand/package.json ./packages/brand/
+COPY prisma/package.json ./prisma/
 RUN corepack enable && corepack prepare --activate && pnpm --version
-
-COPY . .
-
-# Al 2026-10-14 el árbol AÚN NO TIENE `apps/web` ni `pnpm-lock.yaml` en la
-# raíz: este build FALLA HOY, a propósito y con un mensaje legible.
-RUN set -eu; \
-    missing=0; \
-    [ -f pnpm-lock.yaml ]        || { echo "FALTA pnpm-lock.yaml en la raiz del repositorio." >&2; missing=1; }; \
-    [ -f apps/web/package.json ] || { echo "FALTA apps/web/package.json: el frontend todavia no existe." >&2; missing=1; }; \
-    [ "$missing" -eq 0 ] || { \
-      echo "" >&2; \
-      echo "Esta imagen no se puede construir todavia. Ver DESPLIEGUE.md 3.4 y el riesgo R3." >&2; \
-      exit 1; }
 
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store,sharing=locked \
     pnpm install --frozen-lockfile
+
+COPY . .
 
 # `packages/brand` se construye antes que `apps/web` por el `...` del filtro:
 # la marca genera favicon, icono y datos de trazado que la SPA importa.

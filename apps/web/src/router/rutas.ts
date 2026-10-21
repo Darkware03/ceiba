@@ -1,77 +1,130 @@
-import type { RouteRecordRaw } from 'vue-router';
-import {
-  RUTA_CONSTRUCTOR,
-  RUTA_LOGIN,
-  RUTA_NO_ENCONTRADA,
-  RUTA_REGISTRO,
-  RUTA_WORKSPACE,
-  RUTA_WORKSPACES,
-} from './nombres';
-
-/**
- * Tabla de rutas.
- *
- * `requiereSesion` es el único interruptor: el guard de `guardas.ts` lo lee y
- * **deniega por omisión** — una ruta que no diga nada se considera protegida.
- * Es la misma postura que el guard de la API (ADR-0001: «un control que no se
- * puede enumerar no se puede auditar»), y evita el fallo clásico de olvidar la
- * marca en una ruta nueva y publicarla sin querer.
- *
- * Las vistas van en carga diferida (`() => import(...)`) salvo el login: es la
- * primera pantalla de un usuario sin sesión y no merece un salto de red extra.
- */
+import type { RouteRecordRaw } from 'vue-router'
+import { NOMBRES_RUTAS } from './nombres'
 
 declare module 'vue-router' {
   interface RouteMeta {
-    /** `false` SÓLO en las rutas que deben verse sin sesión. */
-    requiereSesion?: boolean;
-    /** Título que se escribe en `document.title`. */
-    titulo?: string;
+    publica?: boolean
+    soloInvitado?: boolean
+    titulo?: string
+    sinArmazon?: boolean
   }
 }
-
-export * from './nombres';
 
 export const rutas: RouteRecordRaw[] = [
   {
     path: '/',
-    redirect: { name: RUTA_WORKSPACES },
+    redirect: { name: NOMBRES_RUTAS.WORKSPACES },
   },
   {
-    path: '/entrar',
-    name: RUTA_LOGIN,
+    path: '/acceso',
+    name: NOMBRES_RUTAS.ACCESO,
     component: () => import('@/views/VistaDeAcceso.vue'),
-    meta: { requiereSesion: false, titulo: 'Entrar' },
+    meta: {
+      publica: true,
+      soloInvitado: true,
+      sinArmazon: true,
+      titulo: 'Iniciar sesión — CEIBA',
+    },
   },
   {
     path: '/registro',
-    name: RUTA_REGISTRO,
+    name: NOMBRES_RUTAS.REGISTRO,
     component: () => import('@/views/VistaDeRegistro.vue'),
-    meta: { requiereSesion: false, titulo: 'Crear cuenta' },
+    meta: {
+      publica: true,
+      soloInvitado: true,
+      sinArmazon: true,
+      titulo: 'Crear cuenta — CEIBA',
+    },
   },
   {
     path: '/workspaces',
-    name: RUTA_WORKSPACES,
+    name: NOMBRES_RUTAS.WORKSPACES,
     component: () => import('@/views/VistaDeWorkspaces.vue'),
-    meta: { requiereSesion: true, titulo: 'Workspaces' },
+    meta: {
+      titulo: 'Espacios de trabajo — CEIBA',
+    },
   },
   {
     path: '/workspaces/:workspaceId',
-    name: RUTA_WORKSPACE,
+    name: NOMBRES_RUTAS.WORKSPACE_DETALLE,
     component: () => import('@/views/VistaDeWorkspace.vue'),
     props: true,
-    meta: { requiereSesion: true, titulo: 'Colecciones' },
+    meta: {
+      titulo: 'Colecciones — CEIBA',
+    },
   },
   {
     path: '/constructor',
-    name: RUTA_CONSTRUCTOR,
+    name: NOMBRES_RUTAS.CONSTRUCTOR,
     component: () => import('@/views/VistaDeConstructor.vue'),
-    meta: { requiereSesion: true, titulo: 'Constructor de solicitudes' },
+    meta: {
+      titulo: 'Constructor HTTP — CEIBA',
+    },
   },
   {
-    path: '/:ruta(.*)*',
-    name: RUTA_NO_ENCONTRADA,
-    component: () => import('@/views/VistaNoEncontrada.vue'),
-    meta: { requiereSesion: false, titulo: 'Página no encontrada' },
+    path: '/historial',
+    name: NOMBRES_RUTAS.HISTORIAL,
+    component: () => import('@/views/VistaDeHistorial.vue'),
+    meta: {
+      titulo: 'Historial de cambios y peticiones — CEIBA',
+    },
   },
-];
+  {
+    path: '/entornos',
+    name: NOMBRES_RUTAS.ENTORNOS,
+    component: () => import('@/views/VistaDeEntornos.vue'),
+    meta: {
+      titulo: 'Entornos y variables — CEIBA',
+    },
+  },
+  {
+    path: '/ejecuciones',
+    name: NOMBRES_RUTAS.EJECUCIONES,
+    component: () => import('@/views/VistaDeEjecuciones.vue'),
+    meta: {
+      titulo: 'Ejecuciones de colecciones — CEIBA',
+    },
+  },
+  {
+    path: '/documentacion',
+    name: NOMBRES_RUTAS.DOCUMENTACION,
+    component: () => import('@/views/VistaDeDocumentacion.vue'),
+    meta: {
+      titulo: 'Documentación de API — CEIBA',
+    },
+  },
+  {
+    path: '/importar',
+    name: NOMBRES_RUTAS.IMPORTAR,
+    component: () => import('@/views/VistaDeImportar.vue'),
+    meta: {
+      titulo: 'Importar y exportar colecciones — CEIBA',
+    },
+  },
+  {
+    path: '/configuracion',
+    name: NOMBRES_RUTAS.CONFIGURACION,
+    component: () => import('@/views/VistaDeConfiguracion.vue'),
+    meta: {
+      titulo: 'Configuración y colaboradores — CEIBA',
+    },
+  },
+  {
+    path: '/invitacion/:token',
+    name: NOMBRES_RUTAS.INVITACION,
+    component: () => import('@/views/VistaDeInvitacion.vue'),
+    meta: {
+      titulo: 'Invitación a workspace — CEIBA',
+    },
+  },
+  {
+    path: '/:rutaNoReconocida(.*)*',
+    name: NOMBRES_RUTAS.NO_ENCONTRADO,
+    component: () => import('@/views/VistaNoEncontrada.vue'),
+    meta: {
+      publica: true,
+      titulo: 'Página no encontrada — CEIBA',
+    },
+  },
+]

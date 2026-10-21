@@ -1,327 +1,636 @@
 <script setup lang="ts">
-/**
- * Pantalla de un workspace: su cabecera y sus colecciones.
- *
- * El `workspaceId` llega por `props` (la ruta declara `props: true`), no
- * leyendo `useRoute()`. Así el componente es montable en una prueba sin
- * instalar un router entero, que es exactamente lo que hace
- * `test/colecciones.test.ts`.
- *
- * Por qué pide **las dos** cosas al montar:
- *  - `GET /workspaces` si la lista no estaba cargada, para poder pintar el
- *    nombre del workspace al entrar directamente por URL. La API no ofrece
- *    nada más barato que esto para un acceso en frío y `listarDeUsuario` ya
- *    devuelve todos los workspaces con membresía activa.
- *  - `GET /workspaces/:id/collections` siempre, porque es el contenido.
- *
- * Si el workspace no aparece en la lista, puede ser que no exista o que el
- * usuario no tenga membresía: la interfaz **no distingue** entre las dos cosas
- * ni lo intenta. Quien decide es el servidor, y no filtrar esa diferencia es
- * justamente lo correcto (§19).
- */
-import { computed, onMounted, ref, watch } from 'vue';
-import { CeibaLoadingScreen } from '@ceiba/brand';
-import CeibaAviso from '@/components/ui/CeibaAviso.vue';
-import CeibaBoton from '@/components/ui/CeibaBoton.vue';
-import CeibaVacio from '@/components/ui/CeibaVacio.vue';
-import DialogoDeBorrado from '@/components/workspaces/DialogoDeBorrado.vue';
-import DialogoDeCreacion from '@/components/workspaces/DialogoDeCreacion.vue';
-import DialogoDeRenombrado from '@/components/workspaces/DialogoDeRenombrado.vue';
-import FilaDeColeccion from '@/components/workspaces/FilaDeColeccion.vue';
-import { usarAlmacenDeColecciones } from '@/stores/colecciones';
-import { usarAlmacenDeWorkspaces } from '@/stores/workspaces';
-// Desde `router/nombres.ts`, que es una hoja sin imports: `router/rutas.ts`
-// arrastraría los `import()` diferidos de todas las vistas.
-import { RUTA_WORKSPACES } from '@/router/nombres';
-import type { Coleccion } from '@/api/tipos';
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
+import { NOMBRES_RUTAS } from '@/router/nombres'
+import { useWorkspacesStore } from '@/stores/workspaces'
+import { useColeccionesStore } from '@/stores/colecciones'
+import { useConstructorStore } from '@/stores/constructor'
+import { apiStudio } from '@/api/studio'
+import type { Coleccion, PeticionGuardada } from '@/api/tipos'
+import CeibaBoton from '@/components/ui/CeibaBoton.vue'
+import CeibaAviso from '@/components/ui/CeibaAviso.vue'
+import CeibaVacio from '@/components/ui/CeibaVacio.vue'
+import CeibaDialogo from '@/components/ui/CeibaDialogo.vue'
+import CeibaCampo from '@/components/ui/CeibaCampo.vue'
+import FilaDeColeccion from '@/components/workspaces/FilaDeColeccion.vue'
+import DialogoDeRenombrado from '@/components/workspaces/DialogoDeRenombrado.vue'
+import DialogoDeBorrado from '@/components/workspaces/DialogoDeBorrado.vue'
 
-/** Tope de `description` en `esquemaCrearColeccion`. */
-const MAXIMO_DESCRIPCION = 4000;
-const NOTA_DE_ROL = 'El servidor exige rol «editor» en este workspace para esta operación.';
+const props = defineProps<{ workspaceId: string }>()
+const router = useRouter()
+const storeWorkspaces = useWorkspacesStore()
+const storeColecciones = useColeccionesStore()
+const storeConstructor = useConstructorStore()
 
-const props = defineProps<{ workspaceId: string }>();
+const dialogoRenombrarAbierto = ref(false)
+const dialogoBorrarAbierto = ref(false)
+const modalColeccionAbierto = ref(false)
+const nombreNuevaColeccion = ref('')
+const descripcionNuevaColeccion = ref('')
+const errorNuevaColeccion = ref<string | null>(null)
+const creandoColeccion = ref(false)
+const modalCarpetaAbierto = ref(false)
+const coleccionDestinoCarpeta = ref<string | null>(null)
+const nombreNuevaCarpeta = ref('')
+const descripcionNuevaCarpeta = ref('')
+const errorNuevaCarpeta = ref<string | null>(null)
+const creandoCarpeta = ref(false)
 
-const workspaces = usarAlmacenDeWorkspaces();
-const almacen = usarAlmacenDeColecciones();
-
-const creando = ref(false);
-const aRenombrar = ref<Coleccion | null>(null);
-const aBorrar = ref<Coleccion | null>(null);
-const errorDeDialogo = ref<string | null>(null);
-
-const workspace = computed(() => workspaces.porId(props.workspaceId));
-const lista = computed(() => almacen.deWorkspace(props.workspaceId));
-const cargada = computed(() => almacen.cargada(props.workspaceId));
-const primeraCarga = computed(() => almacen.cargando && !cargada.value);
-const sinColecciones = computed(() => almacen.estaVacia(props.workspaceId));
-
-/** El workspace no está entre los del usuario y la lista ya se consultó. */
-const workspaceDesconocido = computed(
-  () => workspaces.cargada && workspace.value === null && !workspaces.cargando,
-);
-
-async function cargarTodo(): Promise<void> {
-  if (!workspaces.cargada) await workspaces.cargar();
-  await almacen.cargar(props.workspaceId);
-}
-
-onMounted(() => {
-  void cargarTodo();
-});
-
-// Navegar de un workspace a otro reutiliza el componente: sin esto, la segunda
-// pantalla mostraría las colecciones de la primera.
-watch(
-  () => props.workspaceId,
-  (nuevo, anterior) => {
-    if (nuevo === anterior) return;
-    cerrarDialogos();
-    void almacen.cargar(nuevo);
-  },
-);
-
-function abrirCreacion(): void {
-  errorDeDialogo.value = null;
-  creando.value = true;
-}
-
-function abrirRenombrado(coleccion: Coleccion): void {
-  errorDeDialogo.value = null;
-  aRenombrar.value = coleccion;
-}
-
-function abrirBorrado(coleccion: Coleccion): void {
-  errorDeDialogo.value = null;
-  aBorrar.value = coleccion;
-}
-
-function cerrarDialogos(): void {
-  creando.value = false;
-  aRenombrar.value = null;
-  aBorrar.value = null;
-  errorDeDialogo.value = null;
-}
-
-async function crear(datos: {
-  slug: string;
-  name: string;
-  description: string | null;
-}): Promise<void> {
-  const creada = await almacen.crear(props.workspaceId, datos);
-  if (creada === null) {
-    errorDeDialogo.value = almacen.error;
-    return;
+const workspace = computed(() => storeWorkspaces.activo)
+const rolActual = computed(() => workspace.value?.myRole ?? 'editor')
+const puedeEditar = computed(() => ['owner', 'admin', 'editor'].includes(rolActual.value))
+const etiquetaRol = computed(() => {
+  switch (rolActual.value) {
+    case 'owner': return 'Propietario (Control total)'
+    case 'admin': return 'Administrador (Mostrar y editar)'
+    case 'editor': return 'Colaborador (Mostrar y editar)'
+    case 'executor': return 'Ejecutor (Mostrar y ejecutar)'
+    case 'viewer': return 'Invitado (Solo mostrar)'
+    default: return rolActual.value
   }
-  cerrarDialogos();
+})
+
+async function cargarTodo(id: string): Promise<void> {
+  try {
+    await storeWorkspaces.seleccionarWorkspace(id)
+    await storeColecciones.cargarColecciones(id)
+    try {
+      const config = await apiStudio.obtenerConfiguracionWorkspace(id)
+      if (storeWorkspaces.activo && config.workspace?.myRole) {
+        storeWorkspaces.activo.myRole = config.workspace.myRole as any
+      }
+    } catch { /* ignore */ }
+  } catch { /* reflejado en store */ }
 }
 
-async function renombrar(datos: { name: string; description: string | null }): Promise<void> {
-  const objetivo = aRenombrar.value;
-  if (objetivo === null) return;
-  // `PATCH /collections/:id`: el `workspaceId` no viaja, sirve para refrescar
-  // el índice local (ver `stores/colecciones.ts`).
-  const actualizada = await almacen.renombrar(objetivo.id, props.workspaceId, datos);
-  if (actualizada === null) {
-    errorDeDialogo.value = almacen.error;
-    return;
-  }
-  cerrarDialogos();
+onMounted(() => { void cargarTodo(props.workspaceId) })
+watch(() => props.workspaceId, (id) => { if (id) void cargarTodo(id) })
+
+function abrirModalNuevaColeccion(): void {
+  if (!puedeEditar.value) return
+  nombreNuevaColeccion.value = ''
+  descripcionNuevaColeccion.value = ''
+  errorNuevaColeccion.value = null
+  modalColeccionAbierto.value = true
 }
 
-async function borrar(): Promise<void> {
-  const objetivo = aBorrar.value;
-  if (objetivo === null) return;
-  const borrada = await almacen.borrar(objetivo.id, props.workspaceId);
-  if (!borrada) {
-    errorDeDialogo.value = almacen.error;
-    return;
+async function confirmarNuevaColeccion(): Promise<void> {
+  const nombre = nombreNuevaColeccion.value.trim()
+  if (!nombre) { errorNuevaColeccion.value = 'El nombre de la colección es obligatorio.'; return }
+  creandoColeccion.value = true
+  errorNuevaColeccion.value = null
+  try {
+    await storeColecciones.crearColeccion({
+      workspaceId: props.workspaceId,
+      name: nombre,
+      description: descripcionNuevaColeccion.value.trim() || null,
+    })
+    modalColeccionAbierto.value = false
+  } catch (err) {
+    errorNuevaColeccion.value = err instanceof Error ? err.message : 'No se pudo crear la colección.'
+  } finally {
+    creandoColeccion.value = false
   }
-  cerrarDialogos();
+}
+
+function abrirModalNuevaCarpeta(coleccionId: string): void {
+  if (!puedeEditar.value) return
+  coleccionDestinoCarpeta.value = coleccionId
+  nombreNuevaCarpeta.value = ''
+  descripcionNuevaCarpeta.value = ''
+  errorNuevaCarpeta.value = null
+  modalCarpetaAbierto.value = true
+}
+
+async function confirmarNuevaCarpeta(): Promise<void> {
+  const nombre = nombreNuevaCarpeta.value.trim()
+  if (!nombre || !coleccionDestinoCarpeta.value) {
+    errorNuevaCarpeta.value = 'El nombre de la carpeta es obligatorio.'
+    return
+  }
+  creandoCarpeta.value = true
+  errorNuevaCarpeta.value = null
+  try {
+    await storeColecciones.crearCarpeta(coleccionDestinoCarpeta.value, {
+      name: nombre,
+      description: descripcionNuevaCarpeta.value.trim() || null,
+    })
+    modalCarpetaAbierto.value = false
+  } catch (err) {
+    errorNuevaCarpeta.value = err instanceof Error ? err.message : 'No se pudo crear la carpeta.'
+  } finally {
+    creandoCarpeta.value = false
+  }
+}
+
+function irANuevaPeticion(coleccion: Coleccion): void {
+  if (!puedeEditar.value) return
+  storeConstructor.prepararNuevaEnColeccion(props.workspaceId, coleccion.id, null)
+  void router.push({
+    name: NOMBRES_RUTAS.CONSTRUCTOR,
+    query: { workspaceId: props.workspaceId, collectionId: coleccion.id },
+  })
+}
+
+function abrirPeticionExistente(peticion: PeticionGuardada): void {
+  storeConstructor.cargarDesdePeticionGuardada(peticion, props.workspaceId)
+  void router.push({
+    name: NOMBRES_RUTAS.CONSTRUCTOR,
+    query: { workspaceId: props.workspaceId, collectionId: peticion.collectionId, requestId: peticion.id },
+  })
+}
+
+async function eliminarColeccion(coleccion: Coleccion): Promise<void> {
+  if (!puedeEditar.value) return
+  await storeColecciones.eliminarColeccion(coleccion.id)
+}
+
+function abrirConstructorVacio(): void {
+  storeConstructor.reiniciar()
+  void router.push({ name: NOMBRES_RUTAS.CONSTRUCTOR, query: { workspaceId: props.workspaceId } })
+}
+
+function alBorrarWorkspace(): void {
+  dialogoBorrarAbierto.value = false
+  void router.push({ name: NOMBRES_RUTAS.WORKSPACES })
 }
 </script>
 
+
 <template>
-  <section class="detalle" aria-labelledby="titulo-workspace">
-    <nav class="detalle__migas" aria-label="Ruta de navegación">
-      <RouterLink :to="{ name: RUTA_WORKSPACES }">← Todos los workspaces</RouterLink>
-    </nav>
-
-    <header class="detalle__cabecera">
-      <div class="detalle__identidad">
-        <h1 id="titulo-workspace">{{ workspace?.name ?? 'Workspace' }}</h1>
-        <code class="detalle__slug">{{ workspace?.slug ?? workspaceId }}</code>
-        <p v-if="workspace?.description" class="detalle__descripcion">
-          {{ workspace.description }}
-        </p>
-      </div>
-      <CeibaBoton variante="primario" @click="abrirCreacion">Nueva colección</CeibaBoton>
-    </header>
-
-    <CeibaAviso v-if="workspaceDesconocido" tono="aviso" titulo="Workspace no disponible">
-      No aparece entre tus workspaces. Puede que no exista o que ya no tengas membresía en él.
-    </CeibaAviso>
-
-    <CeibaAviso v-if="almacen.error && !creando && !aRenombrar && !aBorrar" tono="error"
-                titulo="Algo ha fallado">
-      {{ almacen.error }}
-      <p class="detalle__reintento">
-        <CeibaBoton compacto :cargando="almacen.cargando" @click="almacen.cargar(workspaceId)">
-          Reintentar
-        </CeibaBoton>
-      </p>
-    </CeibaAviso>
-
-    <h2 class="detalle__seccion">
-      Colecciones
-      <span v-if="cargada" class="detalle__cuenta">({{ lista.length }})</span>
-    </h2>
-
-    <div v-if="primeraCarga" class="detalle__cargando">
-      <CeibaLoadingScreen
-        inline
-        message="Cargando colecciones…"
-        :detail="`GET /api/v1/workspaces/${workspaceId}/collections`"
-      />
+  <section class="vista-ws" aria-labelledby="titulo-ws">
+    <div class="vista-ws__migas">
+      <RouterLink :to="{ name: NOMBRES_RUTAS.WORKSPACES }" class="vista-ws__miga-enlace">
+        Espacios de trabajo
+      </RouterLink>
+      <span aria-hidden="true">/</span>
+      <span>{{ workspace?.name ?? props.workspaceId }}</span>
     </div>
 
-    <CeibaVacio
-      v-else-if="sinColecciones"
-      titulo="Este workspace no tiene colecciones"
-      detalle="Una colección agrupa peticiones relacionadas: una API, un flujo, un servicio."
-    >
-      <CeibaBoton variante="primario" @click="abrirCreacion">Crear colección</CeibaBoton>
-    </CeibaVacio>
-
-    <ul v-else-if="lista.length > 0" class="detalle__lista ceiba-panel">
-      <FilaDeColeccion
-        v-for="coleccion in lista"
-        :key="coleccion.id"
-        :coleccion="coleccion"
-        @renombrar="abrirRenombrado(coleccion)"
-        @borrar="abrirBorrado(coleccion)"
-      />
-    </ul>
-
-    <DialogoDeCreacion
-      :abierto="creando"
-      titulo="Nueva colección"
-      descripcion="El identificador se usa en las URLs y no cambia al renombrar la colección."
-      etiqueta-nombre="Nombre de la colección"
-      etiqueta-accion="Crear colección"
-      ayuda-slug="Minúsculas, dígitos y guiones. Único dentro del workspace."
-      :maximo-descripcion="MAXIMO_DESCRIPCION"
-      :guardando="almacen.guardando"
-      :error-de-envio="errorDeDialogo"
-      @cerrar="cerrarDialogos"
-      @crear="crear"
+    <CeibaAviso
+      v-if="storeWorkspaces.error || storeColecciones.error"
+      tipo="error"
+      titulo="Error en el espacio de trabajo"
+      :mensaje="storeWorkspaces.error ?? storeColecciones.error ?? ''"
     />
 
+    <header v-if="workspace" class="vista-ws__cabecera">
+      <div class="vista-ws__identidad">
+        <div class="vista-ws__avatar" aria-hidden="true">
+          {{ workspace.name.charAt(0).toUpperCase() }}
+        </div>
+        <div>
+          <div class="vista-ws__titulo-fila">
+            <h1 id="titulo-ws" class="vista-ws__titulo">{{ workspace.name }}</h1>
+            <span class="vista-ws__rol-badge" :data-readonly="!puedeEditar">
+              {{ etiquetaRol }}
+            </span>
+          </div>
+          <p class="vista-ws__meta">
+            <span class="vista-ws__slug">{{ workspace.slug }}</span>
+          </p>
+        </div>
+      </div>
+
+      <div class="vista-ws__acciones">
+        <CeibaBoton
+          v-if="puedeEditar"
+          variante="primario"
+          Tamano="sm"
+          @click="abrirModalNuevaColeccion"
+        >
+          Nueva colección
+        </CeibaBoton>
+        <CeibaBoton variante="secundario" Tamano="sm" @click="abrirConstructorVacio">
+          Constructor libre
+        </CeibaBoton>
+        <CeibaBoton
+          variante="secundario"
+          Tamano="sm"
+          @click="router.push({ name: NOMBRES_RUTAS.CONFIGURACION })"
+        >
+          Invitar / Colaboradores
+        </CeibaBoton>
+        <CeibaBoton
+          variante="secundario"
+          Tamano="sm"
+          @click="router.push({ name: NOMBRES_RUTAS.IMPORTAR })"
+        >
+          Importar / Exportar JSON
+        </CeibaBoton>
+        <CeibaBoton
+          variante="fantasma"
+          Tamano="sm"
+          @click="router.push({ name: NOMBRES_RUTAS.HISTORIAL })"
+        >
+          Historial de cambios
+        </CeibaBoton>
+        <CeibaBoton
+          v-if="rolActual === 'owner' || rolActual === 'admin'"
+          variante="fantasma"
+          Tamano="sm"
+          @click="dialogoRenombrarAbierto = true"
+        >
+          Renombrar
+        </CeibaBoton>
+        <CeibaBoton
+          v-if="rolActual === 'owner'"
+          variante="peligro"
+          Tamano="sm"
+          @click="dialogoBorrarAbierto = true"
+        >
+          Eliminar
+        </CeibaBoton>
+      </div>
+    </header>
+
+    <CeibaAviso
+      v-if="workspace && !puedeEditar"
+      tipo="info"
+      titulo="Modo colaborativo de solo lectura (Solo mostrar)"
+      mensaje="Tienes acceso a visualizar las colecciones, carpetas, peticiones y documentación de este workspace, pero la edición está deshabilitada para tu rol."
+    />
+
+    <section class="vista-ws__colecciones" aria-labelledby="titulo-colecciones">
+      <div class="vista-ws__colecciones-cab">
+        <h2 id="titulo-colecciones" class="vista-ws__subtitulo">
+          Colecciones ({{ storeColecciones.colecciones.length }})
+        </h2>
+      </div>
+
+      <div
+        v-if="storeColecciones.cargando && storeColecciones.colecciones.length === 0"
+        class="vista-ws__cargando"
+      >
+        Cargando colecciones del espacio…
+      </div>
+
+      <div v-else-if="storeColecciones.colecciones.length === 0" class="vista-ws__vacio">
+        <CeibaVacio
+          titulo="Este espacio aún no tiene colecciones"
+          descripcion="Crea tu primera colección o impórtala desde un archivo JSON para organizar carpetas y peticiones HTTP."
+        >
+          <template v-if="puedeEditar" #acciones>
+            <CeibaBoton variante="primario" @click="abrirModalNuevaColeccion">
+              Crear primera colección
+            </CeibaBoton>
+            <CeibaBoton
+              variante="secundario"
+              @click="router.push({ name: NOMBRES_RUTAS.IMPORTAR })"
+            >
+              Importar colección
+            </CeibaBoton>
+          </template>
+        </CeibaVacio>
+      </div>
+
+      <div v-else class="vista-ws__lista-colecciones">
+        <div
+          v-for="col in storeColecciones.colecciones"
+          :key="col.id"
+          class="vista-ws__bloque-coleccion"
+        >
+          <div class="vista-ws__barra-exportar">
+            <CeibaBoton
+              variante="fantasma"
+              Tamano="sm"
+              @click="exportarColeccionJson(col)"
+            >
+              Exportar «{{ col.name }}» (.json)
+            </CeibaBoton>
+          </div>
+          <FilaDeColeccion
+            :coleccion="col"
+            :arbol="storeColecciones.arbolesPorColeccion[col.id]"
+            @renombrar-coleccion="abrirRenombrarColeccion"
+            @eliminar-coleccion="eliminarColeccionDirecto"
+            @crear-carpeta="abrirModalNuevaCarpeta"
+            @eliminar-carpeta="eliminarCarpetaDirecto"
+            @crear-peticion="abrirModalNuevaPeticion"
+            @abrir-peticion="abrirPeticionEnConstructor"
+            @eliminar-peticion="eliminarPeticionDirecto"
+          />
+        </div>
+      </div>
+    </section>
+
     <DialogoDeRenombrado
-      v-if="aRenombrar"
-      :abierto="aRenombrar !== null"
-      titulo="Renombrar colección"
-      :nombre-inicial="aRenombrar.name"
-      :descripcion-inicial="aRenombrar.description"
-      :nota-de-rol="NOTA_DE_ROL"
-      :maximo-descripcion="MAXIMO_DESCRIPCION"
-      :guardando="almacen.guardando"
-      :error-de-envio="errorDeDialogo"
-      @cerrar="cerrarDialogos"
-      @guardar="renombrar"
+      :abierto="dialogoRenombrarAbierto"
+      :workspace="workspace"
+      :procesando="storeWorkspaces.procesando"
+      :error-servidor="storeWorkspaces.error"
+      @cerrar="dialogoRenombrarAbierto = false"
+      @confirmar="confirmarRenombrado"
     />
 
     <DialogoDeBorrado
-      v-if="aBorrar"
-      :abierto="aBorrar !== null"
-      titulo="Borrar colección"
-      :nombre="aBorrar.name"
-      :identificador="aBorrar.slug"
-      consecuencia="Se borrarán también las peticiones y carpetas que contenga."
-      :nota-de-rol="NOTA_DE_ROL"
-      :guardando="almacen.guardando"
-      :error-de-envio="errorDeDialogo"
-      @cerrar="cerrarDialogos"
-      @confirmar="borrar"
+      :abierto="dialogoBorrarAbierto"
+      :workspace="workspace"
+      :procesando="storeWorkspaces.procesando"
+      :error-servidor="storeWorkspaces.error"
+      @cerrar="dialogoBorrarAbierto = false"
+      @confirmar="confirmarBorrado"
     />
+
+    <CeibaDialogo
+      :abierto="modalNuevaColeccion"
+      titulo="Nueva colección"
+      descripcion="Agrupa carpetas y peticiones HTTP dentro del espacio de trabajo."
+      @cerrar="modalNuevaColeccion = false"
+    >
+      <form class="form-modal" @submit.prevent="confirmarNuevaColeccion">
+        <CeibaAviso v-if="errorFormulario" tipo="error" :mensaje="errorFormulario" />
+        <CeibaCampo
+          id="nombre-col"
+          v-model="nombreNuevaColeccion"
+          etiqueta="Nombre de la colección"
+          placeholder="Ej. API de Pagos"
+          obligatorio
+        />
+        <CeibaCampo
+          id="desc-col"
+          v-model="descripcionNuevaColeccion"
+          etiqueta="Descripción (opcional)"
+          placeholder="Endpoints principales del servicio"
+        />
+        <div class="form-modal__acciones">
+          <CeibaBoton variante="fantasma" @click="modalNuevaColeccion = false">
+            Cancelar
+          </CeibaBoton>
+          <CeibaBoton tipo="submit" variante="primario" :cargando="procesandoAccion">
+            Crear colección
+          </CeibaBoton>
+        </div>
+      </form>
+    </CeibaDialogo>
+
+    <CeibaDialogo
+      :abierto="modalRenombrarCol"
+      titulo="Editar colección"
+      @cerrar="modalRenombrarCol = false"
+    >
+      <form class="form-modal" @submit.prevent="confirmarRenombrarColeccion">
+        <CeibaAviso v-if="errorFormulario" tipo="error" :mensaje="errorFormulario" />
+        <CeibaCampo
+          id="renombrar-col"
+          v-model="nuevoNombreCol"
+          etiqueta="Nombre"
+          obligatorio
+        />
+        <CeibaCampo
+          id="renombrar-desc-col"
+          v-model="nuevaDescCol"
+          etiqueta="Descripción"
+        />
+        <div class="form-modal__acciones">
+          <CeibaBoton variante="fantasma" @click="modalRenombrarCol = false">
+            Cancelar
+          </CeibaBoton>
+          <CeibaBoton tipo="submit" variante="primario" :cargando="procesandoAccion">
+            Guardar cambios
+          </CeibaBoton>
+        </div>
+      </form>
+    </CeibaDialogo>
+
+    <CeibaDialogo
+      :abierto="modalNuevaCarpeta"
+      titulo="Nueva carpeta"
+      @cerrar="modalNuevaCarpeta = false"
+    >
+      <form class="form-modal" @submit.prevent="confirmarNuevaCarpeta">
+        <CeibaAviso v-if="errorFormulario" tipo="error" :mensaje="errorFormulario" />
+        <CeibaCampo
+          id="nombre-carpeta"
+          v-model="nombreNuevaCarpeta"
+          etiqueta="Nombre de la carpeta"
+          placeholder="Ej. Autenticación"
+          obligatorio
+        />
+        <div class="form-modal__acciones">
+          <CeibaBoton variante="fantasma" @click="modalNuevaCarpeta = false">
+            Cancelar
+          </CeibaBoton>
+          <CeibaBoton tipo="submit" variante="primario" :cargando="procesandoAccion">
+            Crear carpeta
+          </CeibaBoton>
+        </div>
+      </form>
+    </CeibaDialogo>
+
+    <CeibaDialogo
+      :abierto="modalNuevaPeticion"
+      titulo="Nueva petición HTTP"
+      @cerrar="modalNuevaPeticion = false"
+    >
+      <form class="form-modal" @submit.prevent="confirmarNuevaPeticion">
+        <CeibaAviso v-if="errorFormulario" tipo="error" :mensaje="errorFormulario" />
+        <CeibaCampo
+          id="nombre-peticion"
+          v-model="nombreNuevaPeticion"
+          etiqueta="Nombre de la petición"
+          placeholder="Ej. Listar usuarios"
+          obligatorio
+        />
+        <div class="form-modal__campo-select">
+          <label for="metodo-peticion">Método HTTP</label>
+          <select id="metodo-peticion" v-model="metodoNuevaPeticion">
+            <option value="GET">GET</option>
+            <option value="POST">POST</option>
+            <option value="PUT">PUT</option>
+            <option value="PATCH">PATCH</option>
+            <option value="DELETE">DELETE</option>
+            <option value="HEAD">HEAD</option>
+            <option value="OPTIONS">OPTIONS</option>
+          </select>
+        </div>
+        <CeibaCampo
+          id="url-peticion"
+          v-model="urlNuevaPeticion"
+          etiqueta="URL"
+          placeholder="https://api.ejemplo.com/v1/recurso"
+          obligatorio
+        />
+        <div class="form-modal__acciones">
+          <CeibaBoton variante="fantasma" @click="modalNuevaPeticion = false">
+            Cancelar
+          </CeibaBoton>
+          <CeibaBoton tipo="submit" variante="primario" :cargando="procesandoAccion">
+            Crear y abrir
+          </CeibaBoton>
+        </div>
+      </form>
+    </CeibaDialogo>
   </section>
 </template>
 
 <style scoped>
-.detalle {
+.vista-ws {
+  max-width: 1080px;
+  margin: 0 auto;
   display: flex;
   flex-direction: column;
-  gap: var(--ceiba-space-4);
-  padding: var(--ceiba-space-5);
-  max-width: 1100px;
-  width: 100%;
-  margin: 0 auto;
+  gap: var(--espacio-5);
 }
 
-.detalle__migas {
-  font-size: var(--ceiba-text-sm);
-}
-
-.detalle__cabecera {
+.vista-ws__migas {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
+  gap: var(--espacio-2);
+  font-size: var(--tamano-xs);
+  color: var(--color-texto-atenuado);
+}
+
+.vista-ws__miga-enlace {
+  color: var(--color-texto-secundario);
+}
+
+.vista-ws__cabecera {
+  display: flex;
+  align-items: center;
   justify-content: space-between;
-  gap: var(--ceiba-space-4);
+  gap: var(--espacio-4);
+  flex-wrap: wrap;
+  padding: var(--espacio-5);
+  background-color: var(--color-superficie-1);
+  border: 1px solid var(--color-borde-sutil);
+  border-radius: var(--radio-lg);
+}
+
+.vista-ws__identidad {
+  display: flex;
+  align-items: center;
+  gap: var(--espacio-4);
+}
+
+.vista-ws__avatar {
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radio-md);
+  background-color: var(--color-acento-primario);
+  color: var(--color-texto-sobre-acento);
+  font-weight: var(--peso-bold);
+  font-size: var(--tamano-xl);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.vista-ws__titulo-fila {
+  display: flex;
+  align-items: center;
+  gap: var(--espacio-3);
   flex-wrap: wrap;
 }
 
-.detalle__identidad {
+.vista-ws__titulo {
+  margin: 0;
+  font-size: var(--tamano-xl);
+  font-weight: var(--peso-bold);
+}
+
+.vista-ws__rol-badge {
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: var(--tamano-xs);
+  font-weight: var(--peso-semibold);
+  background-color: var(--color-superficie-3);
+  color: var(--color-texto-primario);
+}
+
+.vista-ws__rol-badge[data-readonly='true'] {
+  background-color: rgba(245, 158, 11, 0.18);
+  color: #f59e0b;
+}
+
+.vista-ws__meta {
+  margin: var(--espacio-1) 0 0;
+  display: flex;
+  align-items: center;
+  gap: var(--espacio-2);
+  font-size: var(--tamano-xs);
+  color: var(--color-texto-atenuado);
+}
+
+.vista-ws__slug {
+  font-family: var(--fuente-mono);
+}
+
+.vista-ws__acciones {
+  display: flex;
+  align-items: center;
+  gap: var(--espacio-2);
+  flex-wrap: wrap;
+}
+
+.vista-ws__colecciones {
   display: flex;
   flex-direction: column;
-  gap: var(--ceiba-space-1);
-  min-width: 0;
+  gap: var(--espacio-3);
 }
 
-.detalle__slug {
-  color: var(--ceiba-text-faint);
-  font-size: var(--ceiba-text-xs);
-}
-
-.detalle__descripcion {
-  margin-top: var(--ceiba-space-1);
-  max-width: 62ch;
-  font-size: var(--ceiba-text-sm);
-  color: var(--ceiba-text-muted);
-}
-
-.detalle__seccion {
-  display: flex;
-  align-items: baseline;
-  gap: var(--ceiba-space-2);
-  font-size: var(--ceiba-text-lg);
-  border-bottom: 1px solid var(--ceiba-border);
-  padding-bottom: var(--ceiba-space-2);
-}
-
-.detalle__cuenta {
-  font-size: var(--ceiba-text-sm);
-  font-weight: 400;
-  color: var(--ceiba-text-faint);
-}
-
-.detalle__reintento {
-  margin-top: var(--ceiba-space-2);
-}
-
-.detalle__cargando {
-  position: relative;
-  min-height: 200px;
-}
-
-.detalle__lista {
+.vista-ws__subtitulo {
   margin: 0;
-  padding: 0;
-  list-style: none;
-  overflow: hidden;
+  font-size: var(--tamano-md);
+  font-weight: var(--peso-semibold);
 }
 
-@media (max-width: 600px) {
-  .detalle {
-    padding: var(--ceiba-space-4) var(--ceiba-space-3);
-  }
+.vista-ws__cargando {
+  padding: var(--espacio-6);
+  text-align: center;
+  color: var(--color-texto-secundario);
+}
+
+.vista-ws__vacio {
+  background-color: var(--color-superficie-1);
+  border: 1px solid var(--color-borde-sutil);
+  border-radius: var(--radio-lg);
+}
+
+.vista-ws__lista-colecciones {
+  display: flex;
+  flex-direction: column;
+  gap: var(--espacio-3);
+}
+
+.vista-ws__bloque-coleccion {
+  display: flex;
+  flex-direction: column;
+  gap: var(--espacio-1);
+}
+
+.vista-ws__barra-exportar {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.form-modal {
+  display: flex;
+  flex-direction: column;
+  gap: var(--espacio-4);
+}
+
+.form-modal__campo-select {
+  display: flex;
+  flex-direction: column;
+  gap: var(--espacio-1);
+  font-size: var(--tamano-xs);
+  font-weight: var(--peso-medio);
+  color: var(--color-texto-secundario);
+}
+
+.form-modal__campo-select select {
+  padding: var(--espacio-2) var(--espacio-3);
+  background-color: var(--color-superficie-2);
+  color: var(--color-texto-primario);
+  border: 1px solid var(--color-borde-fuerte);
+  border-radius: var(--radio-md);
+  font-family: var(--fuente-mono);
+}
+
+.form-modal__acciones {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--espacio-2);
 }
 </style>

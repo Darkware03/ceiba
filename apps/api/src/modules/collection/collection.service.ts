@@ -60,6 +60,7 @@ export class ServicioDeColecciones implements ResolutorDeRecurso, OnModuleInit {
       recursoTipo: 'collection',
       recursoId: fila.id,
       clientIp: ip,
+      detalles: { name: fila.name, slug: fila.slug },
     });
     return fila;
   }
@@ -90,6 +91,7 @@ export class ServicioDeColecciones implements ResolutorDeRecurso, OnModuleInit {
       recursoTipo: 'collection',
       recursoId: fila.id,
       clientIp: ip,
+      detalles: { name: fila.name, cambios },
     });
     return fila;
   }
@@ -106,6 +108,7 @@ export class ServicioDeColecciones implements ResolutorDeRecurso, OnModuleInit {
       recursoTipo: 'collection',
       recursoId: coleccionId,
       clientIp: ip,
+      detalles: { name: fila.name, slug: fila.slug },
     });
   }
 }

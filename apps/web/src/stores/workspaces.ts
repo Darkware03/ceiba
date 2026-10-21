@@ -151,3 +151,5 @@ export const usarAlmacenDeWorkspaces = defineStore('workspaces', {
     },
   },
 });
+export const usarAlmacenWorkspaces = usarAlmacenDeWorkspaces;
+export const useWorkspacesStore = usarAlmacenDeWorkspaces;

@@ -42,3 +42,13 @@ export const Usuario = createParamDecorator((_dato: unknown, contexto: Execution
   const peticion = contexto.switchToHttp().getRequest<Record<string, unknown>>();
   return peticion[CLAVE_PRINCIPAL] as Principal | undefined;
 });
+
+export const UsuarioActual = Usuario;
+export const PrincipalActual = Usuario;
+export const META_SIN_RECURSO = 'ceiba:sin-recurso';
+export const RutaSinRecurso = (): MethodDecorator & ClassDecorator =>
+  SetMetadata(META_SIN_RECURSO, true);
+export const OmitirGuardiaRecurso = RutaSinRecurso;
+export const RutaSinAutorizacionDeRecurso = RutaSinRecurso;
+export const RutaAutenticadaSinRecurso = RutaSinRecurso;
+

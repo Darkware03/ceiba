@@ -167,3 +167,5 @@ export const usarAlmacenDeColecciones = defineStore('colecciones', {
     },
   },
 });
+export const usarAlmacenColecciones = usarAlmacenDeColecciones;
+export const useColeccionesStore = usarAlmacenDeColecciones;

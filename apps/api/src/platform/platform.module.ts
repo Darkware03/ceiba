@@ -106,6 +106,7 @@ export class ModuloDePlataforma {
         REPOSITORIO_DE_SESIONES,
         REPOSITORIO_DE_WORKSPACES,
         REPOSITORIO_DE_COLECCIONES,
+        CLIENTE_PRISMA,
       ],
     };
   }
@@ -118,6 +119,7 @@ export class ModuloDePlataforma {
 function proveedoresDePersistencia(config: ConfiguracionApp): Provider[] {
   if (config.driverPersistencia === 'memory') {
     return [
+      { provide: CLIENTE_PRISMA, useValue: null },
       { provide: REPOSITORIO_DE_USUARIOS, useClass: RepositorioDeUsuariosEnMemoria },
       { provide: REPOSITORIO_DE_SESIONES, useClass: RepositorioDeSesionesEnMemoria },
       { provide: REPOSITORIO_DE_WORKSPACES, useClass: RepositorioDeWorkspacesEnMemoria },

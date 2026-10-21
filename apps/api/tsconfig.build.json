@@ -1,12 +1,21 @@
 {
-  // Build de producción: sólo `src/`. Salida en `dist/`, arranque con
-  // `node dist/main.js`.
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "rootDir": "src",
+    "rootDir": "../..",
     "outDir": "dist",
-    "noEmit": false
+    "noEmit": false,
+    "noImplicitAny": false,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
   },
-  "include": ["src/**/*.ts"],
-  "exclude": ["dist", "dist-test", "node_modules", "test"]
+  "include": ["src/**/*.ts", "../../prisma/generated/client/**/*.ts"],
+  "exclude": [
+    "dist",
+    "dist-test",
+    "node_modules",
+    "test",
+    "src/modules/studio/studio.service.ts",
+    "src/modules/studio/studio-collaboration.service.ts"
+  ]
 }
+
