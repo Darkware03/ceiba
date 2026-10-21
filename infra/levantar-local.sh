@@ -5,9 +5,17 @@
 # ejecutar aquí. Esto no lo sustituye en producción; sirve para tener el
 # producto funcionando y usable hoy.
 #
-#   ./infra/levantar-local.sh          arranca todo
-#   ./infra/levantar-local.sh --parar  detiene todo
-#   ./infra/levantar-local.sh --estado estado de los procesos
+#   ./infra/levantar-local.sh           arranca todo
+#   ./infra/levantar-local.sh --sin-web arranca sin la interfaz (ver abajo)
+#   ./infra/levantar-local.sh --parar   detiene todo
+#   ./infra/levantar-local.sh --estado  estado de los procesos
+#
+# `--sin-web` existe porque `apps/web` es ambito de otro agente: levantar la
+# interfaz implicaria compilarla y reiniciar su servidor mientras alguien la
+# esta editando. Para ejercitar la API basta con PostgreSQL + motor + API; el
+# arnes de `apps/api/scripts/ejercitar-studio.mjs` habla con la API directamente
+# y no pasa por la interfaz. El puerto y el origen publico se calculan igual,
+# asi que `CEIBA_PUBLIC_URL` sigue siendo coherente para el control CSRF.
 set -uo pipefail
 
 RAIZ="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -26,6 +34,18 @@ unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy NODE_USE_ENV_PROXY ALL_PROXY
 export COREPACK_HOME="${COREPACK_HOME:-/tmp/corepack-home}"
 
 mkdir -p "$RUN"
+
+# Los argumentos se leen antes que nada: `--sin-web` puede acompanar a un
+# arranque normal, y no debe confundirse con `--parar` ni con `--estado`.
+SIN_WEB=0
+ARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    --sin-web) SIN_WEB=1 ;;
+    *) ARGS+=("$arg") ;;
+  esac
+done
+set -- "${ARGS[@]+"${ARGS[@]}"}"
 
 parar_pid() {
   # Declaraciones separadas: en un mismo `local a=.. b="$a"` la segunda no ve
@@ -216,6 +236,19 @@ fi
 esperar "http://127.0.0.1:$PUERTO_API/healthz" "api" "ok" 60 || { tail -25 "$RUN/api.log"; exit 1; }
 
 # ---------------------------------------------------------------- web
+if [[ "$SIN_WEB" == "1" ]]; then
+  echo "[4/4] Interfaz OMITIDA (--sin-web)"
+  echo
+  echo "CEIBA (sin interfaz) en marcha:"
+  echo "  api      : http://127.0.0.1:$PUERTO_API/"
+  echo "  motor    : http://127.0.0.1:$PUERTO_MOTOR/"
+  echo "  origen publico declarado a la API (CSRF): $ORIGEN_WEB"
+  echo "  registros: $RUN/{motor,api}.log"
+  echo
+  echo "  detener  : ./infra/levantar-local.sh --parar"
+  exit 0
+fi
+
 echo "[4/4] Interfaz (:$PUERTO_WEB)"
 parar_pid web
 if [[ ! -d "$RAIZ/apps/web/dist" ]]; then
