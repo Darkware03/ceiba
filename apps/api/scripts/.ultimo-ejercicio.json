@@ -1,0 +1,497 @@
+{
+  "generadoEn": "2026-10-21T01:12:51.656Z",
+  "base": "http://127.0.0.1:3000",
+  "origen": "http://127.0.0.1:8444",
+  "prefijo": "api/v1",
+  "destinoEjecucion": "http://127.0.0.1:3000/healthz",
+  "usuarios": {
+    "primario": {
+      "email": "f4-mvhf417t@ceiba.local",
+      "id": "01a15c04-a3a9-7499-acb2-d0afb1aa852d"
+    },
+    "secundario": {
+      "email": "f4-mvhf417t-dos@ceiba.local",
+      "id": "01a15c04-a463-77c9-89a1-ad0d31f732ee"
+    }
+  },
+  "ids": {
+    "workspaceId": "01a15c04-a509-731f-bc64-29a57c106a63",
+    "collectionId": "01a15c04-a52d-766a-af59-90a42cb7186e",
+    "invitacionAceptadaId": "01a15c04-a5dd-76cd-b26c-a9536b15db41",
+    "invitacionRevocableId": "01a15c04-a540-704f-9217-6dea13b76c21",
+    "tokenInvitacion": "lxn9FbUvcerOagcGQ2UXAA.xwpehvfqYeKWuvfkVQdEVUs_2C0hUFCw2WfrnhoO6ac",
+    "memberId": "01a15c04-a463-77c9-89a1-ad0d31f732ee",
+    "entornoA": "01a15c04-a67e-75bb-8a06-6c958c9a152d",
+    "entornoB": "01a15c04-a560-73f8-87b6-3443d2ba35b6",
+    "coleccionImportadaId": "01a15c04-a886-709b-bed5-4521265a0bf1",
+    "coleccionSembradaId": "01a15c04-a782-7019-9057-404319466ccc"
+  },
+  "preparacion": [
+    {
+      "descripcion": "acuñar CSRF (usuario 1)",
+      "metodo": "GET",
+      "ruta": "/api/v1/auth/csrf",
+      "status": 200,
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "cuerpoRecortado": null
+    },
+    {
+      "descripcion": "registrar usuario 1",
+      "metodo": "POST",
+      "ruta": "/api/v1/auth/register",
+      "status": 201,
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "cuerpoRecortado": null
+    },
+    {
+      "descripcion": "iniciar sesión usuario 1",
+      "metodo": "POST",
+      "ruta": "/api/v1/auth/login",
+      "status": 200,
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "cuerpoRecortado": null
+    },
+    {
+      "descripcion": "registrar usuario 2",
+      "metodo": "POST",
+      "ruta": "/api/v1/auth/register",
+      "status": 201,
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "cuerpoRecortado": null
+    },
+    {
+      "descripcion": "acuñar CSRF (usuario 2)",
+      "metodo": "GET",
+      "ruta": "/api/v1/auth/csrf",
+      "status": 200,
+      "veredicto": "funciona",
+      "como": "usuario-2",
+      "cuerpoRecortado": null
+    },
+    {
+      "descripcion": "iniciar sesión usuario 2",
+      "metodo": "POST",
+      "ruta": "/api/v1/auth/login",
+      "status": 200,
+      "veredicto": "funciona",
+      "como": "usuario-2",
+      "cuerpoRecortado": null
+    },
+    {
+      "descripcion": "reiniciar sesión usuario 1",
+      "metodo": "POST",
+      "ruta": "/api/v1/auth/login",
+      "status": 200,
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "cuerpoRecortado": null
+    },
+    {
+      "descripcion": "crear workspace",
+      "metodo": "POST",
+      "ruta": "/api/v1/workspaces",
+      "status": 201,
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "cuerpoRecortado": null
+    },
+    {
+      "descripcion": "crear colección",
+      "metodo": "POST",
+      "ruta": "/api/v1/workspaces/01a15c04-a509-731f-bc64-29a57c106a63/collections",
+      "status": 201,
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "cuerpoRecortado": null
+    },
+    {
+      "descripcion": "crear invitación revocable",
+      "metodo": "POST",
+      "ruta": "/api/v1/workspaces/01a15c04-a509-731f-bc64-29a57c106a63/invitations",
+      "status": 201,
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "cuerpoRecortado": null
+    },
+    {
+      "descripcion": "crear entorno B (para borrado directo)",
+      "metodo": "POST",
+      "ruta": "/api/v1/workspaces/01a15c04-a509-731f-bc64-29a57c106a63/environments",
+      "status": 201,
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "cuerpoRecortado": null
+    },
+    {
+      "descripcion": "releer colaboración para resolver memberId",
+      "metodo": "GET",
+      "ruta": "/api/v1/workspaces/01a15c04-a509-731f-bc64-29a57c106a63/collaboration",
+      "status": 200,
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "cuerpoRecortado": null
+    },
+    {
+      "descripcion": "siembra: Postman v2.1 con 2 carpetas y 3 peticiones",
+      "metodo": "POST",
+      "ruta": "/api/v1/workspaces/01a15c04-a509-731f-bc64-29a57c106a63/collections/import",
+      "status": 201,
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "cuerpoRecortado": null
+    }
+  ],
+  "rutas": [
+    {
+      "numero": 1,
+      "metodo": "GET",
+      "plantilla": "workspaces/:workspaceId/settings",
+      "rutaConcreta": "/api/v1/workspaces/01a15c04-a509-731f-bc64-29a57c106a63/settings",
+      "status": 200,
+      "esperados": "2xx",
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "nota": null,
+      "cuerpoRecortado": null
+    },
+    {
+      "numero": 2,
+      "metodo": "PATCH",
+      "plantilla": "workspaces/:workspaceId/settings",
+      "rutaConcreta": "/api/v1/workspaces/01a15c04-a509-731f-bc64-29a57c106a63/settings",
+      "status": 200,
+      "esperados": "2xx",
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "nota": null,
+      "cuerpoRecortado": null
+    },
+    {
+      "numero": 3,
+      "metodo": "GET",
+      "plantilla": "workspaces/:workspaceId/collaboration",
+      "rutaConcreta": "/api/v1/workspaces/01a15c04-a509-731f-bc64-29a57c106a63/collaboration",
+      "status": 200,
+      "esperados": "2xx",
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "nota": null,
+      "cuerpoRecortado": null
+    },
+    {
+      "numero": 4,
+      "metodo": "GET",
+      "plantilla": "workspaces/:workspaceId/invitations",
+      "rutaConcreta": "/api/v1/workspaces/01a15c04-a509-731f-bc64-29a57c106a63/invitations",
+      "status": 200,
+      "esperados": "2xx",
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "nota": null,
+      "cuerpoRecortado": null
+    },
+    {
+      "numero": 5,
+      "metodo": "POST",
+      "plantilla": "workspaces/:workspaceId/invitations",
+      "rutaConcreta": "/api/v1/workspaces/01a15c04-a509-731f-bc64-29a57c106a63/invitations",
+      "status": 201,
+      "esperados": [
+        201
+      ],
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "nota": "devuelve inviteToken en claro; de ahí salen las dos rutas por token",
+      "cuerpoRecortado": null
+    },
+    {
+      "numero": 6,
+      "metodo": "GET",
+      "plantilla": "invitations/:token",
+      "rutaConcreta": "/api/v1/invitations/lxn9FbUvcerOagcGQ2UXAA.xwpehvfqYeKWuvfkVQdEVUs_2C0hUFCw2WfrnhoO6ac",
+      "status": 200,
+      "esperados": "2xx",
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "nota": null,
+      "cuerpoRecortado": null
+    },
+    {
+      "numero": 7,
+      "metodo": "POST",
+      "plantilla": "invitations/:token/accept",
+      "rutaConcreta": "/api/v1/invitations/lxn9FbUvcerOagcGQ2UXAA.xwpehvfqYeKWuvfkVQdEVUs_2C0hUFCw2WfrnhoO6ac/accept",
+      "status": 201,
+      "esperados": [
+        200,
+        201
+      ],
+      "veredicto": "funciona",
+      "como": "usuario-2",
+      "nota": "ejecutada como usuario 2 (el invitado)",
+      "cuerpoRecortado": null
+    },
+    {
+      "numero": 8,
+      "metodo": "PUT",
+      "plantilla": "workspaces/:workspaceId/members/:memberId/role",
+      "rutaConcreta": "/api/v1/workspaces/01a15c04-a509-731f-bc64-29a57c106a63/members/01a15c04-a463-77c9-89a1-ad0d31f732ee/role",
+      "status": 200,
+      "esperados": "2xx",
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "nota": ":memberId es en realidad el userId del miembro",
+      "cuerpoRecortado": null
+    },
+    {
+      "numero": 9,
+      "metodo": "DELETE",
+      "plantilla": "workspaces/:workspaceId/collaboration/members/:memberId",
+      "rutaConcreta": "/api/v1/workspaces/01a15c04-a509-731f-bc64-29a57c106a63/collaboration/members/01a15c04-a463-77c9-89a1-ad0d31f732ee",
+      "status": 200,
+      "esperados": "2xx",
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "nota": ":memberId es en realidad el userId del miembro",
+      "cuerpoRecortado": null
+    },
+    {
+      "numero": 10,
+      "metodo": "DELETE",
+      "plantilla": "workspaces/:workspaceId/invitations/:invitationId",
+      "rutaConcreta": "/api/v1/workspaces/01a15c04-a509-731f-bc64-29a57c106a63/invitations/01a15c04-a540-704f-9217-6dea13b76c21",
+      "status": 200,
+      "esperados": "2xx",
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "nota": "revoca la invitación pendiente creada en preparación",
+      "cuerpoRecortado": null
+    },
+    {
+      "numero": 11,
+      "metodo": "GET",
+      "plantilla": "workspaces/:workspaceId/environments",
+      "rutaConcreta": "/api/v1/workspaces/01a15c04-a509-731f-bc64-29a57c106a63/environments",
+      "status": 200,
+      "esperados": "2xx",
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "nota": null,
+      "cuerpoRecortado": null
+    },
+    {
+      "numero": 12,
+      "metodo": "POST",
+      "plantilla": "workspaces/:workspaceId/environments",
+      "rutaConcreta": "/api/v1/workspaces/01a15c04-a509-731f-bc64-29a57c106a63/environments",
+      "status": 201,
+      "esperados": [
+        201
+      ],
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "nota": null,
+      "cuerpoRecortado": null
+    },
+    {
+      "numero": 13,
+      "metodo": "PUT",
+      "plantilla": "workspaces/:workspaceId/environments/:environmentId",
+      "rutaConcreta": "/api/v1/workspaces/01a15c04-a509-731f-bc64-29a57c106a63/environments/01a15c04-a67e-75bb-8a06-6c958c9a152d",
+      "status": 200,
+      "esperados": "2xx",
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "nota": null,
+      "cuerpoRecortado": null
+    },
+    {
+      "numero": 14,
+      "metodo": "PATCH",
+      "plantilla": "environments/:environmentId",
+      "rutaConcreta": "/api/v1/environments/01a15c04-a67e-75bb-8a06-6c958c9a152d",
+      "status": 200,
+      "esperados": "2xx",
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "nota": null,
+      "cuerpoRecortado": null
+    },
+    {
+      "numero": 15,
+      "metodo": "POST",
+      "plantilla": "workspaces/:workspaceId/execute",
+      "rutaConcreta": "/api/v1/workspaces/01a15c04-a509-731f-bc64-29a57c106a63/execute",
+      "status": 201,
+      "esperados": [
+        200,
+        201
+      ],
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "nota": null,
+      "cuerpoRecortado": null
+    },
+    {
+      "numero": 16,
+      "metodo": "POST",
+      "plantilla": "requests/execute",
+      "rutaConcreta": "/api/v1/requests/execute",
+      "status": 201,
+      "esperados": [
+        200,
+        201
+      ],
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "nota": "variante heredada; acepta además claves en español",
+      "cuerpoRecortado": null
+    },
+    {
+      "numero": 17,
+      "metodo": "GET",
+      "plantilla": "workspaces/:workspaceId/history/requests",
+      "rutaConcreta": "/api/v1/workspaces/01a15c04-a509-731f-bc64-29a57c106a63/history/requests?limit=20",
+      "status": 200,
+      "esperados": "2xx",
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "nota": null,
+      "cuerpoRecortado": null
+    },
+    {
+      "numero": 18,
+      "metodo": "GET",
+      "plantilla": "workspaces/:workspaceId/history/changes",
+      "rutaConcreta": "/api/v1/workspaces/01a15c04-a509-731f-bc64-29a57c106a63/history/changes?limit=20",
+      "status": 200,
+      "esperados": "2xx",
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "nota": null,
+      "cuerpoRecortado": null
+    },
+    {
+      "numero": 19,
+      "metodo": "GET",
+      "plantilla": "workspaces/:workspaceId/history",
+      "rutaConcreta": "/api/v1/workspaces/01a15c04-a509-731f-bc64-29a57c106a63/history?limit=20",
+      "status": 200,
+      "esperados": "2xx",
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "nota": null,
+      "cuerpoRecortado": null
+    },
+    {
+      "numero": 20,
+      "metodo": "GET",
+      "plantilla": "workspaces/:workspaceId/runs",
+      "rutaConcreta": "/api/v1/workspaces/01a15c04-a509-731f-bc64-29a57c106a63/runs",
+      "status": 200,
+      "esperados": "2xx",
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "nota": null,
+      "cuerpoRecortado": null
+    },
+    {
+      "numero": 21,
+      "metodo": "POST",
+      "plantilla": "workspaces/:workspaceId/runs",
+      "rutaConcreta": "/api/v1/workspaces/01a15c04-a509-731f-bc64-29a57c106a63/runs",
+      "status": 201,
+      "esperados": [
+        201
+      ],
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "nota": null,
+      "cuerpoRecortado": null
+    },
+    {
+      "numero": 22,
+      "metodo": "GET",
+      "plantilla": "workspaces/:workspaceId/documentation",
+      "rutaConcreta": "/api/v1/workspaces/01a15c04-a509-731f-bc64-29a57c106a63/documentation",
+      "status": 200,
+      "esperados": "2xx",
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "nota": null,
+      "cuerpoRecortado": null
+    },
+    {
+      "numero": 23,
+      "metodo": "GET",
+      "plantilla": "workspaces/:workspaceId/collections/:collectionId/export",
+      "rutaConcreta": "/api/v1/workspaces/01a15c04-a509-731f-bc64-29a57c106a63/collections/01a15c04-a782-7019-9057-404319466ccc/export",
+      "status": 200,
+      "esperados": "2xx",
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "nota": null,
+      "cuerpoRecortado": null
+    },
+    {
+      "numero": 24,
+      "metodo": "GET",
+      "plantilla": "collections/:collectionId/export",
+      "rutaConcreta": "/api/v1/collections/01a15c04-a782-7019-9057-404319466ccc/export",
+      "status": 200,
+      "esperados": "2xx",
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "nota": null,
+      "cuerpoRecortado": null
+    },
+    {
+      "numero": 25,
+      "metodo": "POST",
+      "plantilla": "workspaces/:workspaceId/collections/import",
+      "rutaConcreta": "/api/v1/workspaces/01a15c04-a509-731f-bc64-29a57c106a63/collections/import",
+      "status": 201,
+      "esperados": [
+        201
+      ],
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "nota": "usa el JSON devuelto por la exportación previa",
+      "cuerpoRecortado": null
+    },
+    {
+      "numero": 26,
+      "metodo": "DELETE",
+      "plantilla": "workspaces/:workspaceId/environments/:environmentId",
+      "rutaConcreta": "/api/v1/workspaces/01a15c04-a509-731f-bc64-29a57c106a63/environments/01a15c04-a67e-75bb-8a06-6c958c9a152d",
+      "status": 200,
+      "esperados": "2xx",
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "nota": null,
+      "cuerpoRecortado": null
+    },
+    {
+      "numero": 27,
+      "metodo": "DELETE",
+      "plantilla": "environments/:environmentId",
+      "rutaConcreta": "/api/v1/environments/01a15c04-a560-73f8-87b6-3443d2ba35b6",
+      "status": 200,
+      "esperados": "2xx",
+      "veredicto": "funciona",
+      "como": "usuario-1",
+      "nota": "usa el entorno B creado en preparación",
+      "cuerpoRecortado": null
+    }
+  ],
+  "resumen": {
+    "total": 27,
+    "funcionan": 27,
+    "fallan": 0,
+    "preparacionFallida": 0
+  }
+}

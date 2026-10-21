@@ -1,0 +1,302 @@
+{
+  "generadoEn": "2026-10-21T02:12:43.838Z",
+  "base": "http://127.0.0.1:3010",
+  "resultados": [
+    {
+      "descripcion": "acuñar CSRF",
+      "metodo": "GET",
+      "ruta": "/auth/csrf",
+      "status": 200,
+      "esperado": 200,
+      "veredicto": "funciona",
+      "cuerpoRecortado": "{\"csrfToken\":\"OdjMwWcgqx_G3DY5dfUI-C_vyyZlS5II4ot1kbyGE4w.rMwNbFN03VH1TBTNwymxH-GTIyfDMU7a0VMitxhCdDU\"}"
+    },
+    {
+      "descripcion": "registrar propietaria",
+      "metodo": "POST",
+      "ruta": "/auth/register",
+      "status": 201,
+      "esperado": 201,
+      "veredicto": "funciona",
+      "cuerpoRecortado": "{\"usuario\":{\"id\":\"01a15c3b-747b-72bd-a266-ee17f4420751\",\"email\":\"f5-shr-mvhh91ax6rf@ceiba.local\",\"displayName\":\"Dueña SHR\",\"locale\":\"es\",\"timezone\":\"UTC\",\"mfaEnabled\":false,\"emailV…"
+    },
+    {
+      "descripcion": "iniciar sesión",
+      "metodo": "POST",
+      "ruta": "/auth/login",
+      "status": 200,
+      "esperado": 200,
+      "veredicto": "funciona",
+      "cuerpoRecortado": "{\"usuario\":{\"id\":\"01a15c3b-747b-72bd-a266-ee17f4420751\",\"email\":\"f5-shr-mvhh91ax6rf@ceiba.local\",\"displayName\":\"Dueña SHR\",\"locale\":\"es\",\"timezone\":\"UTC\",\"mfaEnabled\":false,\"emailV…"
+    },
+    {
+      "descripcion": "crear workspace",
+      "metodo": "POST",
+      "ruta": "/workspaces",
+      "status": 201,
+      "esperado": 201,
+      "veredicto": "funciona",
+      "cuerpoRecortado": "{\"workspace\":{\"id\":\"01a15c3b-74dd-7118-a49b-0c68efaeaaf4\",\"slug\":\"ws-shr-mvhh91ax6rf\",\"name\":\"WS SHR mvhh91ax6rf\",\"description\":null,\"ownerUserId\":\"01a15c3b-747b-72bd-a266-ee17f442…"
+    },
+    {
+      "descripcion": "importar colección con solicitudes",
+      "metodo": "POST",
+      "ruta": "/workspaces/01a15c3b-74dd-7118-a49b-0c68efaeaaf4/collections/import",
+      "status": 201,
+      "esperado": 201,
+      "veredicto": "funciona",
+      "cuerpoRecortado": "{\"id\":\"01a15c3b-750d-759c-bea4-79965f8a18f9\",\"name\":\"Colección SHR mvhh91ax6rf\",\"description\":\"Sembrada por el arnés F5.\",\"importedFolders\":1,\"importedRequests\":2}"
+    },
+    {
+      "descripcion": "crear enlace privado con código",
+      "metodo": "POST",
+      "ruta": "/collections/01a15c3b-750d-759c-bea4-79965f8a18f9/shares",
+      "status": 201,
+      "esperado": 201,
+      "veredicto": "funciona",
+      "cuerpoRecortado": "{\"share\":{\"id\":\"01a15c3b-7553-73ef-a7a6-0e14293dc974\",\"collectionId\":\"01a15c3b-750d-759c-bea4-79965f8a18f9\",\"slug\":\"HHYNwYh5cRoCYWSuAz2L6A\",\"url\":\"http://127.0.0.1:3010/s/HHYNwYh5c…"
+    },
+    {
+      "descripcion": "listar enlaces de la colección",
+      "metodo": "GET",
+      "ruta": "/collections/01a15c3b-750d-759c-bea4-79965f8a18f9/shares",
+      "status": 200,
+      "esperado": 200,
+      "veredicto": "funciona",
+      "cuerpoRecortado": "{\"shares\":[{\"id\":\"01a15c3b-7553-73ef-a7a6-0e14293dc974\",\"collectionId\":\"01a15c3b-750d-759c-bea4-79965f8a18f9\",\"slug\":\"HHYNwYh5cRoCYWSuAz2L6A\",\"url\":\"http://127.0.0.1:3010/s/HHYNwYh…"
+    },
+    {
+      "descripcion": "detalle del enlace",
+      "metodo": "GET",
+      "ruta": "/shares/01a15c3b-7553-73ef-a7a6-0e14293dc974",
+      "status": 200,
+      "esperado": 200,
+      "veredicto": "funciona",
+      "cuerpoRecortado": "{\"share\":{\"id\":\"01a15c3b-7553-73ef-a7a6-0e14293dc974\",\"collectionId\":\"01a15c3b-750d-759c-bea4-79965f8a18f9\",\"slug\":\"HHYNwYh5cRoCYWSuAz2L6A\",\"url\":\"http://127.0.0.1:3010/s/HHYNwYh5c…"
+    },
+    {
+      "descripcion": "página de acceso (estado)",
+      "metodo": "GET",
+      "ruta": "/share/HHYNwYh5cRoCYWSuAz2L6A",
+      "status": 200,
+      "esperado": 200,
+      "veredicto": "funciona",
+      "cuerpoRecortado": "{\"estado\":\"code_required\"}"
+    },
+    {
+      "descripcion": "código en la URL → 400 code_in_url",
+      "metodo": "GET",
+      "ruta": "/share/HHYNwYh5cRoCYWSuAz2L6A?code=GBNC-ZRY8-0NCP-PTG4-BJ3K-5NP1",
+      "status": 400,
+      "esperado": 400,
+      "veredicto": "funciona",
+      "cuerpoRecortado": "{\"error\":\"code_in_url\",\"mensaje\":\"El código de acceso no puede viajar en la URL. Envíalo en el cuerpo de POST /api/v1/share/:slug/access.\"}"
+    },
+    {
+      "descripcion": "acceso con código incorrecto → 401 uniforme",
+      "metodo": "POST",
+      "ruta": "/share/HHYNwYh5cRoCYWSuAz2L6A/access",
+      "status": 401,
+      "esperado": 401,
+      "veredicto": "funciona",
+      "cuerpoRecortado": "{\"error\":\"invalid_access\",\"mensaje\":\"El enlace o el código no son válidos.\"}"
+    },
+    {
+      "descripcion": "acceso con el código correcto",
+      "metodo": "POST",
+      "ruta": "/share/HHYNwYh5cRoCYWSuAz2L6A/access",
+      "status": 200,
+      "esperado": 200,
+      "veredicto": "funciona",
+      "cuerpoRecortado": "{\"permission\":\"viewer_export\",\"expiresAt\":\"2026-10-21T04:12:43.293Z\",\"collectionName\":null}"
+    },
+    {
+      "descripcion": "sesión de compartición actual",
+      "metodo": "GET",
+      "ruta": "/share/session/me",
+      "status": 200,
+      "esperado": 200,
+      "veredicto": "funciona",
+      "cuerpoRecortado": "{\"permission\":\"viewer_export\",\"expiresAt\":\"2026-10-21T04:12:43.293Z\",\"canExport\":true,\"canExecute\":false}"
+    },
+    {
+      "descripcion": "contenido: colección publicada",
+      "metodo": "GET",
+      "ruta": "/share/content/collection",
+      "status": 200,
+      "esperado": 200,
+      "veredicto": "funciona",
+      "cuerpoRecortado": "{\"collection\":{\"id\":\"01a15c3b-750d-759c-bea4-79965f8a18f9\",\"name\":\"Colección SHR mvhh91ax6rf\",\"slug\":\"coleccion-shr-mvhh91ax6rf\",\"description\":\"Sembrada por el arnés F5.\",\"visibili…"
+    },
+    {
+      "descripcion": "contenido: una solicitud",
+      "metodo": "GET",
+      "ruta": "/share/content/requests/01a15c3b-7528-72b6-8f71-4eafc0456370",
+      "status": 200,
+      "esperado": 200,
+      "veredicto": "funciona",
+      "cuerpoRecortado": "{\"request\":{\"id\":\"01a15c3b-7528-72b6-8f71-4eafc0456370\",\"folderId\":\"01a15c3b-7512-705a-b74c-67f95836e8de\",\"name\":\"Listar facturas\",\"description\":null,\"method\":\"GET\",\"url\":\"https://…"
+    },
+    {
+      "descripcion": "contenido: solicitud ajena → 401",
+      "metodo": "GET",
+      "ruta": "/share/content/requests/00000000-0000-0000-0000-000000000000",
+      "status": 401,
+      "esperado": 401,
+      "veredicto": "funciona",
+      "cuerpoRecortado": "{\"error\":\"invalid_access\",\"mensaje\":\"El enlace o el código no son válidos.\"}"
+    },
+    {
+      "descripcion": "contenido: exportación",
+      "metodo": "GET",
+      "ruta": "/share/content/export",
+      "status": 200,
+      "esperado": 200,
+      "veredicto": "funciona",
+      "cuerpoRecortado": "{\"ceiba\":{\"format\":\"ceiba-collection\",\"version\":1,\"exportedAt\":\"2026-10-21T02:12:43.481Z\",\"source\":\"shared_link\",\"excludes\":[\"secrets\",\"environments\",\"credentials\",\"scripts\"]},\"col…"
+    },
+    {
+      "descripcion": "rotar el código",
+      "metodo": "POST",
+      "ruta": "/shares/01a15c3b-7553-73ef-a7a6-0e14293dc974/codes",
+      "status": 201,
+      "esperado": 201,
+      "veredicto": "funciona",
+      "cuerpoRecortado": "{\"code\":{\"id\":\"01a15c3b-77a9-700a-83de-d49acfd800e7\",\"label\":\"rotado\",\"hint\":null,\"state\":\"active\",\"failedAttemptCount\":0,\"lockedUntil\":null,\"maxAttempts\":10,\"maxUses\":null,\"useCou…"
+    },
+    {
+      "descripcion": "tras rotar: la sesión vieja ya no sirve",
+      "metodo": "GET",
+      "ruta": "/share/content/collection",
+      "status": 401,
+      "esperado": 401,
+      "veredicto": "funciona",
+      "cuerpoRecortado": "{\"error\":\"invalid_access\",\"mensaje\":\"El enlace o el código no son válidos.\"}"
+    },
+    {
+      "descripcion": "revocar el código",
+      "metodo": "DELETE",
+      "ruta": "/shares/01a15c3b-7553-73ef-a7a6-0e14293dc974/codes/01a15c3b-77a9-700a-83de-d49acfd800e7",
+      "status": 200,
+      "esperado": 200,
+      "veredicto": "funciona",
+      "cuerpoRecortado": "{\"closedSessions\":0}"
+    },
+    {
+      "descripcion": "auditoría del propietario",
+      "metodo": "GET",
+      "ruta": "/shares/01a15c3b-7553-73ef-a7a6-0e14293dc974/audit",
+      "status": 200,
+      "esperado": 200,
+      "veredicto": "funciona",
+      "cuerpoRecortado": "{\"attempts\":[{\"id\":\"242\",\"result\":\"success\",\"shareAccessCodeId\":\"01a15c3b-758d-7484-a1c1-10ceacb2c011\",\"clientIpPrefix\":\"127.0.0.0\",\"attemptedAt\":\"2026-10-21T02:12:43.242Z\"},{\"id\":…"
+    },
+    {
+      "descripcion": "revocar el enlace",
+      "metodo": "POST",
+      "ruta": "/shares/01a15c3b-7553-73ef-a7a6-0e14293dc974/revoke",
+      "status": 200,
+      "esperado": 200,
+      "veredicto": "funciona",
+      "cuerpoRecortado": "{\"revokedSessions\":0,\"revokedCodes\":0}"
+    },
+    {
+      "descripcion": "crear enlace público sin código",
+      "metodo": "POST",
+      "ruta": "/collections/01a15c3b-750d-759c-bea4-79965f8a18f9/shares",
+      "status": 201,
+      "esperado": 201,
+      "veredicto": "funciona",
+      "cuerpoRecortado": "{\"share\":{\"id\":\"01a15c3b-7804-7217-9c08-9de1a8e29e60\",\"collectionId\":\"01a15c3b-750d-759c-bea4-79965f8a18f9\",\"slug\":\"-Ywdnhqw3Q35h-fxb7NKkA\",\"url\":\"http://127.0.0.1:3010/s/-Ywdnhqw3…"
+    },
+    {
+      "descripcion": "página de acceso del público",
+      "metodo": "GET",
+      "ruta": "/share/-Ywdnhqw3Q35h-fxb7NKkA",
+      "status": 200,
+      "esperado": 200,
+      "veredicto": "funciona",
+      "cuerpoRecortado": "{\"estado\":\"open\"}"
+    },
+    {
+      "descripcion": "acceso público sin código",
+      "metodo": "POST",
+      "ruta": "/share/-Ywdnhqw3Q35h-fxb7NKkA/access",
+      "status": 200,
+      "esperado": 200,
+      "veredicto": "funciona",
+      "cuerpoRecortado": "{\"permission\":\"viewer\",\"expiresAt\":\"2026-10-21T04:12:43.718Z\",\"collectionName\":null}"
+    },
+    {
+      "descripcion": "cerrar la sesión de compartición",
+      "metodo": "POST",
+      "ruta": "/share/session/logout",
+      "status": 204,
+      "esperado": 204,
+      "veredicto": "funciona",
+      "cuerpoRecortado": ""
+    }
+  ],
+  "comprobaciones": [
+    [
+      "el código se entrega UNA vez en la creación",
+      true
+    ],
+    [
+      "el listado NO devuelve el código",
+      true
+    ],
+    [
+      "la auditoría NO devuelve el código",
+      true
+    ],
+    [
+      "la página de acceso no expone la colección",
+      true
+    ],
+    [
+      "el 401 del código incorrecto es el canónico",
+      true
+    ],
+    [
+      "el acceso correcto emite cookie de compartición",
+      true
+    ],
+    [
+      "la cookie de compartición va acotada a /api/v1/share",
+      true
+    ],
+    [
+      "la cookie de compartición es HttpOnly",
+      true
+    ],
+    [
+      "Referrer-Policy: no-referrer en la página de acceso",
+      true
+    ],
+    [
+      "Cache-Control: no-store en la página de acceso",
+      true
+    ],
+    [
+      "la exportación no contiene \"secretId\"",
+      true
+    ],
+    [
+      "la colección compartida trae solicitudes reales",
+      true
+    ],
+    [
+      "la exportación no publica entornos",
+      true
+    ],
+    [
+      "rotar el código mata la sesión anterior",
+      true
+    ],
+    [
+      "el código rotado es distinto del original",
+      true
+    ]
+  ]
+}
