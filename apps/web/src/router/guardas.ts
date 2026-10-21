@@ -5,9 +5,18 @@ import { RUTA_LOGIN, RUTA_REGISTRO, RUTA_WORKSPACES } from './nombres';
 /**
  * Guard de navegación.
  *
- * **Deniega por omisión**: sólo pasa sin sesión la ruta que declara
- * explícitamente `meta.publica === true`. Una ruta nueva que se olvide
- * de declararlo queda protegida, no abierta.
+ * **Deniega por omisión**: sólo pasa sin sesión la ruta que se declara
+ * pública explícitamente. Una ruta nueva que se olvide de declararlo queda
+ * protegida, no abierta.
+ *
+ * Se admiten **las dos** formas de declararlo, y no por capricho: la tabla de
+ * rutas de la fase 4 marca `meta.publica === true`, mientras que el contrato
+ * escrito en la fase 1 —y las pruebas que lo ejercitan— usa
+ * `meta.requiereSesion === false`. Aceptar ambas es la única lectura que no
+ * rompe ninguna de las dos y, sobre todo, **no debilita la regla**: el
+ * silencio sigue significando «protegida». Lo contrario (quedarse con una
+ * sola) convertiría en pública, por omisión, cualquier ruta declarada con la
+ * otra convención.
  *
  * Tres comportamientos que el cliente pidió y que aquí quedan escritos:
  *
@@ -56,7 +65,7 @@ export async function guardaDeSesion(
   await asegurarSesionComprobada();
   const sesion = usarAlmacenDeSesion();
 
-  const esPublica = hacia.meta.publica === true;
+  const esPublica = hacia.meta.publica === true || hacia.meta.requiereSesion === false;
 
   if (!esPublica && !sesion.autenticado) {
     return {

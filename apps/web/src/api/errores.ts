@@ -31,6 +31,36 @@ export class ErrorDeApi extends Error {
   }
 }
 
+/**
+ * La interfaz pide algo que **la API todavía no expone**.
+ *
+ * No es un fallo de red ni un 404 del servidor: es un hueco conocido del
+ * contrato, comprobado ruta por ruta contra
+ * `apps/api/src/modules/studio/studio.controller.ts`. Se declara como tipo
+ * propio para que la vista pueda distinguirlo y decirlo con todas sus letras
+ * en vez de inventarse el endpoint o disfrazar el hueco de error pasajero con
+ * un botón de «reintentar» que nunca va a funcionar.
+ */
+export class ErrorDeHueco extends Error {
+  override readonly name = 'ErrorDeHueco';
+  /** Ruta que haría falta, tal y como se pediría: `GET /workspaces/:id/runs/:runId`. */
+  readonly rutaQueFalta: string;
+
+  constructor(rutaQueFalta: string, mensaje?: string) {
+    super(
+      mensaje ??
+        `La API todavía no expone «${rutaQueFalta}». Es un hueco conocido del ` +
+          'contrato, no un fallo pasajero.',
+    );
+    this.rutaQueFalta = rutaQueFalta;
+  }
+}
+
+/** `true` si el fallo es un hueco del contrato y no un error de ejecución. */
+export function esErrorDeHueco(error: unknown): error is ErrorDeHueco {
+  return error instanceof ErrorDeHueco;
+}
+
 /** No hubo respuesta: red caída, servidor apagado, CORS, petición abortada. */
 export class ErrorDeRed extends Error {
   override readonly name = 'ErrorDeRed';
@@ -52,6 +82,7 @@ export function mensajeDeError(error: unknown): string {
     if (error.detalles.length > 0) return `${error.message} (${error.detalles.join('; ')})`;
     return error.message;
   }
+  if (error instanceof ErrorDeHueco) return error.message;
   if (error instanceof ErrorDeRed) return error.message;
   if (error instanceof Error && error.message.length > 0) return error.message;
   return 'Ha ocurrido un error inesperado.';

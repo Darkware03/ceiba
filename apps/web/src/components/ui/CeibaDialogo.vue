@@ -67,7 +67,13 @@ watch(
 }
 
 .dialogo::backdrop {
-  background: rgb(0 0 0 / 55%);
+  /* El velo del diálogo usa el mismo token que el velo de la pantalla de
+   * carga: es el único fondo de superposición que define `@ceiba/brand`, y
+   * trae las dos variantes de tema. El `rgb(0 0 0 / 55%)` que había aquí era
+   * un negro fijo que en tema claro oscurecía la página entera.
+   * PETICIÓN A darkware: un `--ceiba-overlay-backdrop` propio para diálogos
+   * distinguiría los dos casos sin reutilizar el de carga. */
+  background: var(--ceiba-loading-backdrop);
 }
 
 .dialogo__marco {

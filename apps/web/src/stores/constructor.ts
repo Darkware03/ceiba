@@ -6,6 +6,7 @@ import {
   tipoDeContenidoDe,
 } from '@/api/ejecucion';
 import type {
+  ModoDeCuerpo,
   CodigoDeError,
   CuerpoDeSolicitud,
   Desenlace,
@@ -111,7 +112,12 @@ export const usarAlmacenDeConstructor = defineStore(ID_DEL_ALMACEN, {
     cabeceras: [nuevoPar()],
     parametros: [nuevoPar()],
     cuerpo: cuerpoInicial(),
-    adaptador: 'motor',
+    // `navegador`, no `motor`: los adaptadores que existen son
+    // `'navegador' | 'api'` (`api/ejecucion.ts:392`). `'motor'` no es ninguno,
+    // así que el almacén arrancaba en un adaptador inexistente y
+    // `cabecerasIgnoradas` dejaba de avisar de las cabeceras que el navegador
+    // descarta —justo el aviso que exige la prueba del constructor—.
+    adaptador: 'navegador',
     ejecutando: false,
     resultado: null,
     error: null,
@@ -241,15 +247,25 @@ export const usarAlmacenDeConstructor = defineStore(ID_DEL_ALMACEN, {
         datos.queryParams && datos.queryParams.length > 0
           ? datos.queryParams.map((q) => nuevoPar(q.key, q.value, q.enabled))
           : [nuevoPar()];
-      const modo =
-        datos.bodyType === 'json' || datos.bodyType === 'text' || datos.bodyType === 'form_urlencoded'
-          ? (datos.bodyType === 'form_urlencoded' ? 'text' : datos.bodyType)
-          : 'none';
-      this.cuerpo = {
-        modo,
-        contenido: datos.body ?? '',
-        tipoContenido: modo === 'json' ? 'application/json' : modo === 'text' ? 'text/plain' : null,
-      };
+      // Los modos que existen son `'none' | 'raw' | 'json'`
+      // (`api/ejecucion.ts:122`). No hay modo `'text'`: lo que no es JSON y
+      // tiene cuerpo es `raw`, y el tipo de contenido es quien distingue el
+      // texto plano de un formulario codificado.
+      const modo: ModoDeCuerpo =
+        datos.bodyType === 'json'
+          ? 'json'
+          : datos.bodyType === 'text' || datos.bodyType === 'form_urlencoded'
+            ? 'raw'
+            : 'none';
+      const tipoContenido =
+        modo === 'json'
+          ? 'application/json'
+          : datos.bodyType === 'form_urlencoded'
+            ? 'application/x-www-form-urlencoded'
+            : modo === 'raw'
+              ? 'text/plain'
+              : null;
+      this.cuerpo = { modo, contenido: datos.body ?? '', tipoContenido };
       this.resultado = null;
       this.error = null;
     },

@@ -1,7 +1,35 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
-import { useRouter } from 'vue-router';
+/**
+ * Pantalla «Historial»: bitácora de auditoría, peticiones ya ejecutadas y
+ * versiones de colección de un workspace.
+ *
+ * Los cuatro estados que exige el estándar (BRIEF-FASE4 §2.2.4) están
+ * separados y no se pisan:
+ *
+ *  - **cargando**: `CeibaLoadingScreen` en modo `inline` (el giro de la marca
+ *    de `@ceiba/brand`). Para las recargas, el botón «Actualizar» lleva
+ *    `:cargando`, que también muestra la marca girando. No hay ni un
+ *    indicador de actividad propio, a propósito.
+ *  - **error**: `CeibaAviso` con el mensaje de la API y un reintento. El
+ *    error **no borra** lo ya cargado: un fallo de red pasajero no debe
+ *    convertirse en una pantalla que afirme que no hay historial.
+ *  - **vacío**: se distingue «no hay nada registrado» de «el filtro no
+ *    encuentra nada», porque son dos problemas distintos del usuario.
+ *  - **con datos**: las tres tablas.
+ *
+ * Las pestañas son pestañas de verdad (`role="tablist"`/`role="tab"` con
+ * `aria-selected` y `aria-controls`), siguiendo el patrón de
+ * `VistaDeConstructor.vue`. No son botones: `CeibaBoton` no representa una
+ * pestaña y usarlo aquí mentiría a los lectores de pantalla.
+ *
+ * Todo valor visual sale de un token `--ceiba-*` de `@ceiba/brand`.
+ */
+import { computed, onMounted, ref, useId, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
+import { CeibaLoadingScreen } from '@ceiba/brand';
 
+import { METODOS_PERMITIDOS, type MetodoDeSolicitud } from '@/api/ejecucion';
+import { mensajeDeError } from '@/api/errores';
 import {
   listarHistorialModificaciones,
   listarHistorialPeticiones,
@@ -11,24 +39,42 @@ import {
 } from '@/api/studio';
 import CeibaAviso from '@/components/ui/CeibaAviso.vue';
 import CeibaBoton from '@/components/ui/CeibaBoton.vue';
+import CeibaCampo from '@/components/ui/CeibaCampo.vue';
 import CeibaVacio from '@/components/ui/CeibaVacio.vue';
-import { NOMBRES_RUTA } from '@/router/nombres';
-import { usarAlmacenConstructor } from '@/stores/constructor';
-import { usarAlmacenWorkspaces } from '@/stores/workspaces';
+import { NOMBRES_RUTAS } from '@/router/nombres';
+import { usarAlmacenDeConstructor } from '@/stores/constructor';
+import { usarAlmacenDeWorkspaces } from '@/stores/workspaces';
 
+type Pestana = 'cambios' | 'peticiones' | 'versiones';
+
+/** Tope de eventos de auditoría que pide esta pantalla. */
+const LIMITE_DE_EVENTOS = 100;
+/** Tope de peticiones ejecutadas que pide esta pantalla. */
+const LIMITE_DE_PETICIONES = 80;
+
+const route = useRoute();
 const router = useRouter();
-const almacenWorkspaces = usarAlmacenWorkspaces();
-const almacenConstructor = usarAlmacenConstructor();
+const almacenWorkspaces = usarAlmacenDeWorkspaces();
+const almacenConstructor = usarAlmacenDeConstructor();
 
-const workspaceSeleccionadoId = ref<string>('');
-const pestanaActiva = ref<'cambios' | 'peticiones' | 'versiones'>('cambios');
+/* Identificadores únicos: `aria-controls` y `<label for>` necesitan ids
+ * estables y que no choquen si la vista se monta dos veces. */
+const idBase = useId();
+const idSelector = `historial-workspace-${idBase}`;
+const idDePestana = (pestana: Pestana): string => `historial-pestana-${pestana}-${idBase}`;
+const idDePanel = (pestana: Pestana): string => `historial-panel-${pestana}-${idBase}`;
+
+const workspaceId = ref('');
+const pestanaActiva = ref<Pestana>('cambios');
 const cargando = ref(false);
+/** `true` en cuanto una carga ha terminado **con éxito** para este workspace. */
+const cargado = ref(false);
 const errorMensaje = ref<string | null>(null);
 
-const eventosCambios = ref<EventoDeAuditoria[]>([]);
+const eventos = ref<EventoDeAuditoria[]>([]);
 const versiones = ref<VersionDeColeccion[]>([]);
-const historialPeticiones = ref<EntradaHistorialPeticion[]>([]);
-const filtroTexto = ref('');
+const peticiones = ref<EntradaHistorialPeticion[]>([]);
+const filtro = ref('');
 const entradaSeleccionada = ref<EntradaHistorialPeticion | null>(null);
 
 const ETIQUETAS_ACCION: Record<string, string> = {
@@ -62,70 +108,133 @@ function traducirAccion(action: string): string {
   return ETIQUETAS_ACCION[action] ?? action;
 }
 
+const cargandoWorkspaces = computed(
+  () => almacenWorkspaces.cargando && !almacenWorkspaces.cargada,
+);
+const sinWorkspaces = computed(() => almacenWorkspaces.estaVacia);
+/** Primera carga de este workspace: todavía no hay nada que enseñar debajo. */
+const primeraCarga = computed(() => cargando.value && !cargado.value);
+
 const eventosFiltrados = computed(() => {
-  const q = filtroTexto.value.trim().toLowerCase();
-  if (!q) return eventosCambios.value;
-  return eventosCambios.value.filter(
-    (e) =>
-      traducirAccion(e.action).toLowerCase().includes(q) ||
-      (e.actorName ?? '').toLowerCase().includes(q) ||
-      (e.actorEmail ?? '').toLowerCase().includes(q) ||
-      e.resourceType.toLowerCase().includes(q) ||
-      JSON.stringify(e.metadata ?? {}).toLowerCase().includes(q),
+  const texto = filtro.value.trim().toLowerCase();
+  if (texto === '') return eventos.value;
+  return eventos.value.filter(
+    (evento) =>
+      traducirAccion(evento.action).toLowerCase().includes(texto) ||
+      (evento.actorName ?? '').toLowerCase().includes(texto) ||
+      (evento.actorEmail ?? '').toLowerCase().includes(texto) ||
+      evento.resourceType.toLowerCase().includes(texto) ||
+      JSON.stringify(evento.metadata ?? {})
+        .toLowerCase()
+        .includes(texto),
   );
 });
 
 const peticionesFiltradas = computed(() => {
-  const q = filtroTexto.value.trim().toLowerCase();
-  if (!q) return historialPeticiones.value;
-  return historialPeticiones.value.filter(
-    (h) =>
-      h.resolvedUrl.toLowerCase().includes(q) ||
-      h.method.toLowerCase().includes(q) ||
-      h.userName.toLowerCase().includes(q),
+  const texto = filtro.value.trim().toLowerCase();
+  if (texto === '') return peticiones.value;
+  return peticiones.value.filter(
+    (entrada) =>
+      entrada.resolvedUrl.toLowerCase().includes(texto) ||
+      entrada.method.toLowerCase().includes(texto) ||
+      entrada.userName.toLowerCase().includes(texto) ||
+      (entrada.environmentName ?? '').toLowerCase().includes(texto),
+  );
+});
+
+const versionesFiltradas = computed(() => {
+  const texto = filtro.value.trim().toLowerCase();
+  if (texto === '') return versiones.value;
+  return versiones.value.filter(
+    (version) =>
+      version.collectionName.toLowerCase().includes(texto) ||
+      (version.label ?? '').toLowerCase().includes(texto) ||
+      (version.notes ?? '').toLowerCase().includes(texto) ||
+      version.createdByName.toLowerCase().includes(texto),
   );
 });
 
 async function cargarDatos(): Promise<void> {
-  if (!workspaceSeleccionadoId.value) return;
+  if (workspaceId.value === '') return;
   cargando.value = true;
   errorMensaje.value = null;
   try {
-    const [modificaciones, peticiones] = await Promise.all([
-      listarHistorialModificaciones(workspaceSeleccionadoId.value, 100),
-      listarHistorialPeticiones(workspaceSeleccionadoId.value, 80),
+    const [modificaciones, ejecutadas] = await Promise.all([
+      listarHistorialModificaciones(workspaceId.value, LIMITE_DE_EVENTOS),
+      listarHistorialPeticiones(workspaceId.value, LIMITE_DE_PETICIONES),
     ]);
-    eventosCambios.value = modificaciones.items;
+    eventos.value = modificaciones.items;
     versiones.value = modificaciones.versions;
-    historialPeticiones.value = peticiones.items;
-  } catch (err) {
-    errorMensaje.value = err instanceof Error ? err.message : 'No se pudo cargar el historial.';
+    peticiones.value = ejecutadas.items;
+    cargado.value = true;
+  } catch (error) {
+    // Lo ya cargado se deja intacto: ver la cabecera del fichero.
+    errorMensaje.value = mensajeDeError(error);
   } finally {
     cargando.value = false;
   }
 }
 
-function reabrirEnConstructor(item: EntradaHistorialPeticion): void {
-  almacenConstructor.establecerMetodo(item.method);
-  almacenConstructor.establecerUrl(item.resolvedUrl);
-  router.push({ name: NOMBRES_RUTA.CONSTRUCTOR });
+/** `METODOS_PERMITIDOS` es el vocabulario cerrado del contrato del motor. */
+function esMetodoDelContrato(metodo: string): metodo is MetodoDeSolicitud {
+  return (METODOS_PERMITIDOS as readonly string[]).includes(metodo);
+}
+
+function clasesDeMetodo(metodo: string): string[] {
+  const normalizado = metodo.toLowerCase();
+  return esMetodoDelContrato(metodo.toUpperCase())
+    ? ['ceiba-metodo', `ceiba-metodo--${normalizado}`]
+    : ['ceiba-metodo'];
+}
+
+/**
+ * El constructor sólo admite los métodos del contrato. Si el historial trae
+ * otro, el botón se deshabilita en vez de reabrirlo como `GET`: cambiar el
+ * método por la espalda sería ejecutar algo distinto de lo que se pidió.
+ */
+function esReabrible(entrada: EntradaHistorialPeticion): boolean {
+  return esMetodoDelContrato(entrada.method.toUpperCase());
+}
+
+function reabrirEnConstructor(entrada: EntradaHistorialPeticion): void {
+  const metodo = entrada.method.toUpperCase();
+  if (!esMetodoDelContrato(metodo)) return;
+  almacenConstructor.cargarDesdePeticionGuardada({
+    workspaceId: entrada.workspaceId,
+    requestId: entrada.requestId ?? undefined,
+    method: metodo,
+    url: entrada.resolvedUrl,
+  });
+  void router.push({ name: NOMBRES_RUTAS.CONSTRUCTOR });
+}
+
+function irAWorkspaces(): void {
+  void router.push({ name: NOMBRES_RUTAS.WORKSPACES });
 }
 
 function formatearFecha(iso: string): string {
-  try {
-    return new Date(iso).toLocaleString('es-SV', {
-      dateStyle: 'medium',
-      timeStyle: 'medium',
-    });
-  } catch {
-    return iso;
-  }
+  const fecha = new Date(iso);
+  if (Number.isNaN(fecha.getTime())) return iso;
+  return fecha.toLocaleString('es-SV', { dateStyle: 'medium', timeStyle: 'medium' });
+}
+
+function respuestaCorrecta(entrada: EntradaHistorialPeticion): boolean {
+  return entrada.responseStatus !== null && entrada.responseStatus < 400;
+}
+
+function etiquetaDeEstado(entrada: EntradaHistorialPeticion): string {
+  if (entrada.responseStatus !== null) return String(entrada.responseStatus);
+  return 'Sin respuesta';
+}
+
+function duracionLegible(ms: number | null): string {
+  return ms === null ? '—' : `${ms} ms`;
 }
 
 function resumirMetadatos(meta: Record<string, unknown> | null): string {
-  if (!meta) return '';
+  if (meta === null) return '';
   const partes: string[] = [];
-  if (typeof meta.name === 'string') partes.push(`Nombre: "${meta.name}"`);
+  if (typeof meta.name === 'string') partes.push(`Nombre: «${meta.name}»`);
   if (typeof meta.method === 'string') partes.push(`Método: ${meta.method}`);
   if (typeof meta.url === 'string') partes.push(`URL: ${meta.url}`);
   if (typeof meta.role === 'string') partes.push(`Rol: ${meta.role}`);
@@ -133,375 +242,660 @@ function resumirMetadatos(meta: Record<string, unknown> | null): string {
   if (typeof meta.label === 'string') partes.push(`Versión: ${meta.label}`);
   if (partes.length > 0) return partes.join(' · ');
   return Object.entries(meta)
-    .map(([k, v]) => `${k}: ${typeof v === 'object' ? JSON.stringify(v) : String(v)}`)
+    .map(([clave, valor]) => `${clave}: ${typeof valor === 'object' ? JSON.stringify(valor) : String(valor)}`)
     .join(' · ');
 }
 
-watch(workspaceSeleccionadoId, () => {
-  void cargarDatos();
+function cuerpoDeLaEntrada(entrada: EntradaHistorialPeticion): string {
+  return entrada.responseBodyPreview ?? entrada.errorMessage ?? '(La API no guardó cuerpo de respuesta para esta petición.)';
+}
+
+watch(workspaceId, (nuevo) => {
+  entradaSeleccionada.value = null;
+  cargado.value = false;
+  eventos.value = [];
+  versiones.value = [];
+  peticiones.value = [];
+  if (nuevo !== '') void cargarDatos();
 });
 
 onMounted(async () => {
-  if (almacenWorkspaces.lista.length === 0) {
-    await almacenWorkspaces.cargarLista();
-  }
-  const inicial = almacenWorkspaces.actual?.id ?? almacenWorkspaces.lista[0]?.id ?? '';
-  workspaceSeleccionadoId.value = inicial;
+  if (!almacenWorkspaces.cargada) await almacenWorkspaces.cargar();
+  // Workspace de la consulta si es uno al que se tiene acceso; si no, el
+  // primero de la lista; si no hay ninguno, estado vacío explícito.
+  const pedido = typeof route.query.workspaceId === 'string' ? route.query.workspaceId : '';
+  const existe = pedido !== '' && almacenWorkspaces.porId(pedido) !== null;
+  workspaceId.value = existe ? pedido : (almacenWorkspaces.lista[0]?.id ?? '');
 });
 </script>
 
 <template>
-  <section class="ceiba-pagina">
-    <header class="ceiba-pagina__cabecera">
+  <section class="historial" aria-labelledby="historial-titulo">
+    <header class="historial__cabecera">
       <div>
-        <h1 class="ceiba-pagina__titulo">Historial de cambios y ejecuciones</h1>
-        <p class="ceiba-pagina__subtitulo">
-          Bitácora auditable de todas las modificaciones realizadas por el equipo y de las peticiones HTTP ejecutadas.
+        <h1 id="historial-titulo">Historial de cambios y ejecuciones</h1>
+        <p class="historial__subtitulo">
+          Bitácora auditable de las modificaciones del equipo y de las peticiones HTTP ya
+          ejecutadas en este workspace.
         </p>
       </div>
-      <div class="ceiba-pagina__controles">
-        <label class="ceiba-selector-inline">
-          <span>Workspace:</span>
-          <select v-model="workspaceSeleccionadoId" class="ceiba-select">
+
+      <div class="historial__controles">
+        <div class="historial__selector">
+          <label class="historial__etiqueta" :for="idSelector">Workspace</label>
+          <select
+            :id="idSelector"
+            v-model="workspaceId"
+            class="historial__select"
+            :disabled="almacenWorkspaces.lista.length === 0"
+          >
+            <option v-if="almacenWorkspaces.lista.length === 0" value="">Sin workspaces</option>
             <option v-for="ws in almacenWorkspaces.lista" :key="ws.id" :value="ws.id">
               {{ ws.name }}
             </option>
           </select>
-        </label>
-        <CeibaBoton variante="secundario" :cargando="cargando" @click="cargarDatos">
+        </div>
+        <CeibaBoton
+          variante="secundario"
+          :cargando="cargando"
+          :deshabilitado="workspaceId === ''"
+          @click="cargarDatos()"
+        >
           Actualizar
         </CeibaBoton>
       </div>
     </header>
 
-    <CeibaAviso v-if="errorMensaje" tipo="error" :titulo="errorMensaje" />
+    <CeibaAviso
+      v-if="almacenWorkspaces.error"
+      tono="error"
+      titulo="No se pudo cargar la lista de workspaces"
+    >
+      {{ almacenWorkspaces.error }}
+      <p class="historial__reintento">
+        <CeibaBoton
+          compacto
+          :cargando="almacenWorkspaces.cargando"
+          @click="almacenWorkspaces.cargar()"
+        >
+          Reintentar
+        </CeibaBoton>
+      </p>
+    </CeibaAviso>
 
-    <div class="ceiba-barra-filtros">
-      <div class="ceiba-pestanas" role="tablist">
-        <button
-          type="button"
-          class="ceiba-pestana"
-          :class="{ 'ceiba-pestana--activa': pestanaActiva === 'cambios' }"
-          @click="pestanaActiva = 'cambios'"
-        >
-          Modificaciones y auditoría ({{ eventosCambios.length }})
-        </button>
-        <button
-          type="button"
-          class="ceiba-pestana"
-          :class="{ 'ceiba-pestana--activa': pestanaActiva === 'peticiones' }"
-          @click="pestanaActiva = 'peticiones'"
-        >
-          Ejecuciones HTTP ({{ historialPeticiones.length }})
-        </button>
-        <button
-          type="button"
-          class="ceiba-pestana"
-          :class="{ 'ceiba-pestana--activa': pestanaActiva === 'versiones' }"
-          @click="pestanaActiva = 'versiones'"
-        >
-          Versiones de colecciones ({{ versiones.length }})
-        </button>
-      </div>
+    <CeibaAviso v-if="errorMensaje" tono="error" titulo="No se pudo cargar el historial">
+      {{ errorMensaje }}
+      <p class="historial__reintento">
+        <CeibaBoton compacto :cargando="cargando" @click="cargarDatos()">Reintentar</CeibaBoton>
+      </p>
+    </CeibaAviso>
 
-      <input
-        v-model="filtroTexto"
-        type="search"
-        class="ceiba-input-busqueda"
-        placeholder="Filtrar por usuario, acción, recurso o URL…"
-      />
+    <div v-if="cargandoWorkspaces" class="historial__espera">
+      <CeibaLoadingScreen inline message="Cargando workspaces…" detail="GET /api/v1/workspaces" />
     </div>
 
-    <!-- Pestaña 1: Historial de modificaciones -->
-    <div v-if="pestanaActiva === 'cambios'" class="ceiba-panel">
-      <CeibaVacio
-        v-if="!cargando && eventosFiltrados.length === 0"
-        titulo="Sin cambios registrados todavía"
-        descripcion="Cada creación o modificación de colecciones, carpetas, peticiones, entornos o miembros quedará registrada aquí."
-      />
-      <div v-else class="ceiba-tabla-contenedor">
-        <table class="ceiba-tabla">
-          <thead>
-            <tr>
-              <th>Fecha y hora</th>
-              <th>Usuario</th>
-              <th>Acción realizada</th>
-              <th>Recurso</th>
-              <th>Detalle del cambio</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="ev in eventosFiltrados" :key="ev.id">
-              <td class="ceiba-mono">{{ formatearFecha(ev.occurredAt) }}</td>
-              <td>
-                <strong>{{ ev.actorName || 'Usuario' }}</strong>
-                <div v-if="ev.actorEmail" class="ceiba-texto-suave">{{ ev.actorEmail }}</div>
-              </td>
-              <td>
-                <span class="ceiba-chip">{{ traducirAccion(ev.action) }}</span>
-              </td>
-              <td class="ceiba-mono">{{ ev.resourceType }}</td>
-              <td class="ceiba-detalle-celda">{{ resumirMetadatos(ev.metadata) || '—' }}</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
+    <CeibaVacio
+      v-else-if="sinWorkspaces"
+      titulo="Todavía no hay ningún workspace"
+      detalle="El historial se registra por workspace. Crea el primero para que haya una bitácora que mostrar."
+    >
+      <CeibaBoton variante="primario" @click="irAWorkspaces()">Ir a workspaces</CeibaBoton>
+    </CeibaVacio>
 
-    <!-- Pestaña 2: Historial de peticiones ejecutadas -->
-    <div v-else-if="pestanaActiva === 'peticiones'" class="ceiba-panel">
-      <CeibaVacio
-        v-if="!cargando && peticionesFiltradas.length === 0"
-        titulo="Sin ejecuciones HTTP registradas"
-        descripcion="Ejecuta una petición en el Constructor HTTP o corre una colección completa para ver su historial."
-      />
-      <div v-else class="ceiba-tabla-contenedor">
-        <table class="ceiba-tabla">
-          <thead>
-            <tr>
-              <th>Fecha</th>
-              <th>Método</th>
-              <th>URL resuelta</th>
-              <th>Estado</th>
-              <th>Duración</th>
-              <th>Ejecutado por</th>
-              <th>Acciones</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="item in peticionesFiltradas" :key="item.id">
-              <td class="ceiba-mono">{{ formatearFecha(item.executedAt) }}</td>
-              <td>
-                <span class="ceiba-metodo">{{ item.method }}</span>
-              </td>
-              <td class="ceiba-mono ceiba-url-celda">{{ item.resolvedUrl }}</td>
-              <td>
-                <span
-                  class="ceiba-estado"
-                  :class="
-                    item.statusCode && item.statusCode >= 200 && item.statusCode < 400
-                      ? 'ceiba-estado--ok'
-                      : 'ceiba-estado--error'
-                  "
-                >
-                  {{ item.statusCode ?? item.errorCode ?? 'ERROR' }}
-                </span>
-              </td>
-              <td class="ceiba-mono">{{ item.durationMs ?? 0 }} ms</td>
-              <td>{{ item.userName }}</td>
-              <td class="ceiba-acciones-fila">
-                <CeibaBoton tamano="sm" variante="fantasma" @click="entradaSeleccionada = item">
-                  Ver respuesta
-                </CeibaBoton>
-                <CeibaBoton tamano="sm" variante="secundario" @click="reabrirEnConstructor(item)">
-                  Abrir en constructor
-                </CeibaBoton>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <div v-if="entradaSeleccionada" class="ceiba-visor-detalle">
-        <div class="ceiba-visor-detalle__cabecera">
-          <strong>
-            Detalle de ejecución: {{ entradaSeleccionada.method }} {{ entradaSeleccionada.resolvedUrl }}
-          </strong>
-          <CeibaBoton tamano="sm" variante="fantasma" @click="entradaSeleccionada = null">
-            Cerrar
-          </CeibaBoton>
+    <template v-else>
+      <div class="historial__barra">
+        <div class="historial__pestanas" role="tablist" aria-label="Secciones del historial">
+          <button
+            :id="idDePestana('cambios')"
+            class="historial__pestana"
+            :class="{ 'historial__pestana--activa': pestanaActiva === 'cambios' }"
+            type="button"
+            role="tab"
+            :aria-selected="pestanaActiva === 'cambios'"
+            :aria-controls="idDePanel('cambios')"
+            @click="pestanaActiva = 'cambios'"
+          >
+            Modificaciones y auditoría ({{ eventos.length }})
+          </button>
+          <button
+            :id="idDePestana('peticiones')"
+            class="historial__pestana"
+            :class="{ 'historial__pestana--activa': pestanaActiva === 'peticiones' }"
+            type="button"
+            role="tab"
+            :aria-selected="pestanaActiva === 'peticiones'"
+            :aria-controls="idDePanel('peticiones')"
+            @click="pestanaActiva = 'peticiones'"
+          >
+            Ejecuciones HTTP ({{ peticiones.length }})
+          </button>
+          <button
+            :id="idDePestana('versiones')"
+            class="historial__pestana"
+            :class="{ 'historial__pestana--activa': pestanaActiva === 'versiones' }"
+            type="button"
+            role="tab"
+            :aria-selected="pestanaActiva === 'versiones'"
+            :aria-controls="idDePanel('versiones')"
+            @click="pestanaActiva = 'versiones'"
+          >
+            Versiones de colecciones ({{ versiones.length }})
+          </button>
         </div>
-        <pre class="ceiba-pre">{{ entradaSeleccionada.responseBodyPreview || entradaSeleccionada.errorMessage || '(Sin cuerpo)' }}</pre>
-      </div>
-    </div>
 
-    <!-- Pestaña 3: Versiones de colecciones -->
-    <div v-else class="ceiba-panel">
-      <CeibaVacio
-        v-if="!cargando && versiones.length === 0"
-        titulo="Sin instantáneas de versión todavía"
-        descripcion="Al importar colecciones o guardar versiones se almacenan instantáneas completas aquí."
-      />
-      <div v-else class="ceiba-tabla-contenedor">
-        <table class="ceiba-tabla">
-          <thead>
-            <tr>
-              <th>Colección</th>
-              <th>Versión</th>
-              <th>Etiqueta</th>
-              <th>Notas de versión</th>
-              <th>Fecha</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="ver in versiones" :key="ver.id">
-              <td><strong>{{ ver.collectionName || ver.collectionId }}</strong></td>
-              <td class="ceiba-mono">v{{ ver.versionNumber }}</td>
-              <td><span class="ceiba-chip">{{ ver.label || `v${ver.versionNumber}` }}</span></td>
-              <td>{{ ver.changelog || '—' }}</td>
-              <td class="ceiba-mono">{{ formatearFecha(ver.createdAt) }}</td>
-            </tr>
-          </tbody>
-        </table>
+        <div class="historial__filtro">
+          <CeibaCampo
+            v-model="filtro"
+            etiqueta="Filtrar historial"
+            tipo="search"
+            marcador-de-posicion="Usuario, acción, recurso o URL…"
+            ayuda="El filtro se aplica sólo a lo que ya está cargado en pantalla."
+          />
+        </div>
       </div>
-    </div>
+
+      <!-- Pestaña 1: modificaciones y auditoría -->
+      <div
+        v-if="pestanaActiva === 'cambios'"
+        :id="idDePanel('cambios')"
+        class="historial__panel"
+        role="tabpanel"
+        :aria-labelledby="idDePestana('cambios')"
+        tabindex="0"
+      >
+        <div v-if="primeraCarga" class="historial__espera">
+          <CeibaLoadingScreen
+            inline
+            message="Cargando la bitácora de cambios…"
+            detail="GET /api/v1/workspaces/:id/history/changes"
+          />
+        </div>
+
+        <CeibaVacio
+          v-else-if="eventos.length === 0"
+          titulo="Sin cambios registrados todavía"
+          detalle="Cada creación o modificación de colecciones, carpetas, peticiones, entornos o miembros quedará registrada aquí."
+        />
+
+        <CeibaVacio
+          v-else-if="eventosFiltrados.length === 0"
+          titulo="El filtro no encuentra ningún cambio"
+          :detalle="`Hay ${eventos.length} cambios cargados, pero ninguno coincide con «${filtro.trim()}».`"
+        >
+          <CeibaBoton compacto @click="filtro = ''">Quitar el filtro</CeibaBoton>
+        </CeibaVacio>
+
+        <div v-else class="historial__tabla-contenedor">
+          <table class="historial__tabla">
+            <caption class="ceiba-oculto-visual">
+              Modificaciones registradas en la auditoría del workspace
+            </caption>
+            <thead>
+              <tr>
+                <th scope="col">Fecha y hora</th>
+                <th scope="col">Usuario</th>
+                <th scope="col">Acción realizada</th>
+                <th scope="col">Recurso</th>
+                <th scope="col">Detalle del cambio</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="evento in eventosFiltrados" :key="evento.id">
+                <td class="historial__mono">{{ formatearFecha(evento.occurredAt) }}</td>
+                <td>
+                  <strong>{{ evento.actorName || 'Usuario' }}</strong>
+                  <div v-if="evento.actorEmail" class="historial__suave">
+                    {{ evento.actorEmail }}
+                  </div>
+                </td>
+                <td><span class="historial__chip">{{ traducirAccion(evento.action) }}</span></td>
+                <td class="historial__mono">{{ evento.resourceType }}</td>
+                <td class="historial__detalle">{{ resumirMetadatos(evento.metadata) || '—' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Pestaña 2: peticiones HTTP ya ejecutadas -->
+      <div
+        v-else-if="pestanaActiva === 'peticiones'"
+        :id="idDePanel('peticiones')"
+        class="historial__panel"
+        role="tabpanel"
+        :aria-labelledby="idDePestana('peticiones')"
+        tabindex="0"
+      >
+        <div v-if="primeraCarga" class="historial__espera">
+          <CeibaLoadingScreen
+            inline
+            message="Cargando las peticiones ejecutadas…"
+            detail="GET /api/v1/workspaces/:id/history/requests"
+          />
+        </div>
+
+        <CeibaVacio
+          v-else-if="peticiones.length === 0"
+          titulo="Sin ejecuciones HTTP registradas"
+          detalle="Lanza una petición desde el constructor o corre una colección completa para que aparezca aquí."
+        />
+
+        <CeibaVacio
+          v-else-if="peticionesFiltradas.length === 0"
+          titulo="El filtro no encuentra ninguna petición"
+          :detalle="`Hay ${peticiones.length} peticiones cargadas, pero ninguna coincide con «${filtro.trim()}».`"
+        >
+          <CeibaBoton compacto @click="filtro = ''">Quitar el filtro</CeibaBoton>
+        </CeibaVacio>
+
+        <template v-else>
+          <div class="historial__tabla-contenedor">
+            <table class="historial__tabla">
+              <caption class="ceiba-oculto-visual">
+                Peticiones HTTP ejecutadas en el workspace
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col">Fecha</th>
+                  <th scope="col">Método</th>
+                  <th scope="col">URL resuelta</th>
+                  <th scope="col">Estado</th>
+                  <th scope="col">Duración</th>
+                  <th scope="col">Ejecutado por</th>
+                  <th scope="col">Acciones</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="entrada in peticionesFiltradas" :key="entrada.id">
+                  <td class="historial__mono">{{ formatearFecha(entrada.executedAt) }}</td>
+                  <td><span :class="clasesDeMetodo(entrada.method)">{{ entrada.method }}</span></td>
+                  <td class="historial__mono historial__url">{{ entrada.resolvedUrl }}</td>
+                  <td>
+                    <span
+                      class="historial__estado"
+                      :class="
+                        respuestaCorrecta(entrada)
+                          ? 'historial__estado--ok'
+                          : 'historial__estado--fallo'
+                      "
+                    >
+                      {{ etiquetaDeEstado(entrada) }}
+                    </span>
+                  </td>
+                  <td class="historial__mono">{{ duracionLegible(entrada.responseTimeMs) }}</td>
+                  <td>{{ entrada.userName }}</td>
+                  <td>
+                    <div class="historial__acciones">
+                      <CeibaBoton
+                        compacto
+                        variante="fantasma"
+                        @click="entradaSeleccionada = entrada"
+                      >
+                        Ver respuesta
+                      </CeibaBoton>
+                      <CeibaBoton
+                        compacto
+                        variante="secundario"
+                        :deshabilitado="!esReabrible(entrada)"
+                        :title="
+                          esReabrible(entrada)
+                            ? undefined
+                            : `El constructor no admite el método ${entrada.method}.`
+                        "
+                        @click="reabrirEnConstructor(entrada)"
+                      >
+                        Abrir en constructor
+                      </CeibaBoton>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <section
+            v-if="entradaSeleccionada"
+            class="historial__visor"
+            aria-label="Respuesta guardada de la petición seleccionada"
+          >
+            <header class="historial__visor-cabecera">
+              <strong class="historial__mono">
+                {{ entradaSeleccionada.method }} {{ entradaSeleccionada.resolvedUrl }}
+              </strong>
+              <CeibaBoton compacto variante="fantasma" @click="entradaSeleccionada = null">
+                Cerrar
+              </CeibaBoton>
+            </header>
+            <p class="historial__suave">
+              Vista previa guardada por la API; puede estar recortada respecto a la respuesta
+              original.
+            </p>
+            <pre class="historial__pre">{{ cuerpoDeLaEntrada(entradaSeleccionada) }}</pre>
+          </section>
+        </template>
+      </div>
+
+      <!-- Pestaña 3: versiones de colecciones -->
+      <div
+        v-else
+        :id="idDePanel('versiones')"
+        class="historial__panel"
+        role="tabpanel"
+        :aria-labelledby="idDePestana('versiones')"
+        tabindex="0"
+      >
+        <div v-if="primeraCarga" class="historial__espera">
+          <CeibaLoadingScreen
+            inline
+            message="Cargando las versiones de colección…"
+            detail="GET /api/v1/workspaces/:id/history/changes"
+          />
+        </div>
+
+        <CeibaVacio
+          v-else-if="versiones.length === 0"
+          titulo="Sin instantáneas de versión todavía"
+          detalle="Al importar una colección o guardar una versión se almacena aquí una instantánea completa."
+        />
+
+        <CeibaVacio
+          v-else-if="versionesFiltradas.length === 0"
+          titulo="El filtro no encuentra ninguna versión"
+          :detalle="`Hay ${versiones.length} versiones cargadas, pero ninguna coincide con «${filtro.trim()}».`"
+        >
+          <CeibaBoton compacto @click="filtro = ''">Quitar el filtro</CeibaBoton>
+        </CeibaVacio>
+
+        <div v-else class="historial__tabla-contenedor">
+          <table class="historial__tabla">
+            <caption class="ceiba-oculto-visual">
+              Instantáneas de versión de las colecciones del workspace
+            </caption>
+            <thead>
+              <tr>
+                <th scope="col">Colección</th>
+                <th scope="col">Versión</th>
+                <th scope="col">Etiqueta</th>
+                <th scope="col">Notas</th>
+                <th scope="col">Autor</th>
+                <th scope="col">Fecha</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="version in versionesFiltradas" :key="version.id">
+                <td><strong>{{ version.collectionName || version.collectionId }}</strong></td>
+                <td class="historial__mono">v{{ version.versionNumber }}</td>
+                <td>
+                  <span class="historial__chip">{{ version.label || `v${version.versionNumber}` }}</span>
+                </td>
+                <td class="historial__detalle">{{ version.notes || '—' }}</td>
+                <td>{{ version.createdByName }}</td>
+                <td class="historial__mono">{{ formatearFecha(version.createdAt) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </template>
   </section>
 </template>
 
 <style scoped>
-.ceiba-pagina {
+.historial {
   max-width: 1200px;
+  width: 100%;
   margin: 0 auto;
   display: flex;
   flex-direction: column;
-  gap: var(--ceiba-espacio-5);
+  gap: var(--ceiba-space-5);
 }
-.ceiba-pagina__cabecera {
+
+.historial__cabecera {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
-  gap: var(--ceiba-espacio-4);
+  gap: var(--ceiba-space-4);
   flex-wrap: wrap;
 }
-.ceiba-pagina__titulo {
-  margin: 0;
-  font-size: var(--ceiba-tamano-h1);
-  font-weight: var(--ceiba-peso-negrita);
+
+.historial__subtitulo {
+  margin-top: var(--ceiba-space-1);
+  max-width: 68ch;
+  color: var(--ceiba-text-muted);
+  font-size: var(--ceiba-text-sm);
 }
-.ceiba-pagina__subtitulo {
-  margin: 4px 0 0;
-  color: var(--text-secondary);
-}
-.ceiba-pagina__controles {
+
+.historial__controles {
   display: flex;
-  align-items: center;
-  gap: var(--ceiba-espacio-3);
+  align-items: flex-end;
+  gap: var(--ceiba-space-3);
+  flex-wrap: wrap;
 }
-.ceiba-selector-inline {
+
+.historial__selector {
   display: flex;
-  align-items: center;
-  gap: var(--ceiba-espacio-2);
-  font-size: var(--ceiba-tamano-body);
+  flex-direction: column;
+  gap: var(--ceiba-space-1);
 }
-.ceiba-select,
-.ceiba-input-busqueda {
-  padding: 6px 10px;
-  border-radius: var(--ceiba-radio-sm);
-  border: 1px solid var(--border-default);
-  background: var(--bg-surface);
-  color: var(--text-primary);
+
+.historial__etiqueta {
+  font-size: var(--ceiba-text-sm);
+  font-weight: 500;
+  color: var(--ceiba-text-muted);
 }
-.ceiba-input-busqueda {
-  min-width: 280px;
+
+.historial__select {
+  min-width: 220px;
+  padding: var(--ceiba-space-2) var(--ceiba-space-3);
+  border: 1px solid var(--ceiba-border-strong);
+  border-radius: var(--ceiba-radius-md);
+  background: var(--ceiba-surface);
+  color: var(--ceiba-text);
+  font-family: inherit;
+  font-size: var(--ceiba-text-sm);
 }
-.ceiba-barra-filtros {
+
+.historial__select:disabled {
+  color: var(--ceiba-text-faint);
+  cursor: not-allowed;
+}
+
+.historial__reintento {
+  margin-top: var(--ceiba-space-2);
+}
+
+/* `CeibaLoadingScreen inline` se coloca sobre su contenedor: tiene que ser
+ * `position: relative` y tener altura propia o no se vería nada. */
+.historial__espera {
+  position: relative;
+  min-height: 180px;
+}
+
+.historial__barra {
   display: flex;
   justify-content: space-between;
-  align-items: center;
-  gap: var(--ceiba-espacio-3);
+  align-items: flex-end;
+  gap: var(--ceiba-space-4);
   flex-wrap: wrap;
 }
-.ceiba-pestanas {
+
+.historial__pestanas {
   display: flex;
-  gap: var(--ceiba-espacio-2);
+  gap: var(--ceiba-space-1);
+  border-bottom: 1px solid var(--ceiba-border);
 }
-.ceiba-pestana {
-  padding: 8px 14px;
-  border-radius: var(--ceiba-radio-sm);
-  border: 1px solid var(--border-subtle);
-  background: var(--bg-surface);
-  color: var(--text-secondary);
+
+.historial__pestana {
+  padding: var(--ceiba-space-2) var(--ceiba-space-3);
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--ceiba-text-muted);
+  font-family: inherit;
+  font-size: var(--ceiba-text-sm);
   cursor: pointer;
-  font-weight: var(--ceiba-peso-medio);
+  transition: color var(--ceiba-duration-fast) var(--ceiba-ease);
 }
-.ceiba-pestana--activa {
-  background: var(--brand-primary-subtle);
-  color: var(--brand-primary);
-  border-color: var(--brand-primary);
+
+.historial__pestana--activa {
+  color: var(--ceiba-text);
+  border-bottom-color: var(--ceiba-accent);
+  font-weight: 600;
 }
-.ceiba-tabla-contenedor {
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--ceiba-radio-md);
-  background: var(--bg-surface);
+
+.historial__pestana:focus-visible,
+.historial__select:focus-visible,
+.historial__panel:focus-visible {
+  outline: none;
+  box-shadow: var(--ceiba-focus-ring);
+  border-radius: var(--ceiba-radius-sm);
+}
+
+.historial__filtro {
+  min-width: 280px;
+  flex: 1 1 280px;
+  max-width: 420px;
+}
+
+.historial__panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ceiba-space-4);
+  min-width: 0;
+}
+
+.historial__tabla-contenedor {
+  border: 1px solid var(--ceiba-border);
+  border-radius: var(--ceiba-radius-lg);
+  background: var(--ceiba-surface);
   overflow-x: auto;
 }
-.ceiba-tabla {
+
+.historial__tabla {
   width: 100%;
   border-collapse: collapse;
-  font-size: 13px;
+  font-size: var(--ceiba-text-sm);
 }
-.ceiba-tabla th,
-.ceiba-tabla td {
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--border-subtle);
+
+.historial__tabla th,
+.historial__tabla td {
+  padding: var(--ceiba-space-2) var(--ceiba-space-3);
+  border-bottom: 1px solid var(--ceiba-border);
   text-align: left;
   vertical-align: top;
 }
-.ceiba-tabla th {
-  color: var(--text-muted);
-  font-weight: var(--ceiba-peso-medio);
-  background: var(--bg-raised);
+
+.historial__tabla tbody tr:last-child td {
+  border-bottom: none;
 }
-.ceiba-mono {
-  font-family: var(--ceiba-fuente-mono);
-  font-size: 12px;
+
+.historial__tabla th {
+  background: var(--ceiba-surface-raised);
+  color: var(--ceiba-text-muted);
+  font-weight: 500;
+  white-space: nowrap;
 }
-.ceiba-texto-suave {
-  font-size: 12px;
-  color: var(--text-muted);
+
+.historial__mono {
+  font-family: var(--ceiba-font-mono);
+  font-size: var(--ceiba-text-xs);
 }
-.ceiba-chip {
+
+.historial__suave {
+  color: var(--ceiba-text-faint);
+  font-size: var(--ceiba-text-xs);
+}
+
+.historial__chip {
   display: inline-block;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: var(--bg-raised);
-  border: 1px solid var(--border-subtle);
-  font-size: 12px;
+  padding: var(--ceiba-space-1) var(--ceiba-space-2);
+  border: 1px solid var(--ceiba-border);
+  border-radius: var(--ceiba-radius-pill);
+  background: var(--ceiba-surface-raised);
+  font-size: var(--ceiba-text-xs);
 }
-.ceiba-metodo {
-  font-family: var(--ceiba-fuente-mono);
-  font-weight: var(--ceiba-peso-semibold);
+
+/* Insignia de estado: fondo neutro + color e indicador de estado en el borde,
+ * como hace `CeibaAviso`. No hay token de fondo teñido y no se inventa uno. */
+.historial__estado {
+  display: inline-block;
+  padding: var(--ceiba-space-1) var(--ceiba-space-2);
+  border: 1px solid var(--ceiba-border);
+  border-left-width: 3px;
+  border-radius: var(--ceiba-radius-sm);
+  background: var(--ceiba-surface-raised);
+  font-family: var(--ceiba-font-mono);
+  font-size: var(--ceiba-text-xs);
+  white-space: nowrap;
 }
-.ceiba-estado {
-  padding: 2px 8px;
-  border-radius: 4px;
-  font-family: var(--ceiba-fuente-mono);
-  font-size: 12px;
+
+.historial__estado--ok {
+  color: var(--ceiba-success);
+  border-left-color: var(--ceiba-success);
 }
-.ceiba-estado--ok {
-  background: rgba(16, 185, 129, 0.14);
-  color: #10b981;
+
+.historial__estado--fallo {
+  color: var(--ceiba-danger);
+  border-left-color: var(--ceiba-danger);
 }
-.ceiba-estado--error {
-  background: rgba(239, 68, 68, 0.14);
-  color: #ef4444;
+
+.historial__url {
+  max-width: 44ch;
+  word-break: break-all;
 }
-.ceiba-acciones-fila {
+
+.historial__detalle {
+  max-width: 48ch;
+  color: var(--ceiba-text-muted);
+}
+
+.historial__acciones {
   display: flex;
-  gap: 6px;
+  gap: var(--ceiba-space-2);
+  flex-wrap: wrap;
 }
-.ceiba-visor-detalle {
-  margin-top: var(--ceiba-espacio-4);
-  padding: var(--ceiba-espacio-4);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--ceiba-radio-md);
-  background: var(--bg-surface);
+
+.historial__visor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ceiba-space-2);
+  padding: var(--ceiba-space-4);
+  border: 1px solid var(--ceiba-border);
+  border-radius: var(--ceiba-radius-lg);
+  background: var(--ceiba-surface);
 }
-.ceiba-visor-detalle__cabecera {
+
+.historial__visor-cabecera {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: var(--ceiba-espacio-2);
+  gap: var(--ceiba-space-3);
+  flex-wrap: wrap;
 }
-.ceiba-pre {
+
+.historial__pre {
   margin: 0;
-  padding: var(--ceiba-espacio-3);
-  background: var(--bg-raised);
-  border-radius: var(--ceiba-radio-sm);
-  font-family: var(--ceiba-fuente-mono);
-  font-size: 12px;
-  max-height: 280px;
+  padding: var(--ceiba-space-3);
+  border-radius: var(--ceiba-radius-md);
+  background: var(--ceiba-bg-sunken);
+  color: var(--ceiba-text);
+  font-family: var(--ceiba-font-mono);
+  font-size: var(--ceiba-text-xs);
+  max-height: 320px;
   overflow: auto;
   white-space: pre-wrap;
+  word-break: break-word;
+}
+
+@media (max-width: 720px) {
+  .historial__cabecera,
+  .historial__barra {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .historial__filtro {
+    max-width: none;
+  }
 }
 </style>

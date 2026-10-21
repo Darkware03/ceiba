@@ -180,21 +180,27 @@ async function enviar(): Promise<void> {
       </p>
       <ul class="constructor__lista">
         <li v-for="entrada in constructor.historial" :key="entrada.id" class="constructor__entrada">
-          <button
+          <CeibaBoton
+            variante="fantasma"
+            ancho-completo
             class="constructor__recuperar"
-            type="button"
+            :aria-label="`Recuperar ${entrada.metodo} ${entrada.url}`"
             @click="constructor.recuperarDelHistorial(entrada.id)"
           >
-            <span class="ceiba-metodo" :class="`ceiba-metodo--${entrada.metodo.toLowerCase()}`">
-              {{ entrada.metodo }}
+            <span class="constructor__entrada-rejilla">
+              <span class="ceiba-metodo" :class="`ceiba-metodo--${entrada.metodo.toLowerCase()}`">
+                {{ entrada.metodo }}
+              </span>
+              <span class="constructor__entrada-url">{{ entrada.url }}</span>
+              <span v-if="entrada.estado !== null" class="constructor__entrada-estado">
+                {{ entrada.estado }}
+              </span>
+              <span v-else class="constructor__entrada-fallo">{{ entrada.codigoDeError }}</span>
+              <span class="constructor__entrada-tiempo">
+                {{ formatearDuracion(entrada.totalMs) }}
+              </span>
             </span>
-            <span class="constructor__entrada-url">{{ entrada.url }}</span>
-            <span v-if="entrada.estado !== null" class="constructor__entrada-estado">
-              {{ entrada.estado }}
-            </span>
-            <span v-else class="constructor__entrada-fallo">{{ entrada.codigoDeError }}</span>
-            <span class="constructor__entrada-tiempo">{{ formatearDuracion(entrada.totalMs) }}</span>
-          </button>
+          </CeibaBoton>
         </li>
       </ul>
     </section>
@@ -324,21 +330,23 @@ async function enviar(): Promise<void> {
   gap: var(--ceiba-space-1);
 }
 
+/* La fila del historial **es** un `CeibaBoton`, no un botón propio: ejecuta una
+ * acción (recuperar esa solicitud en el editor). Lo único que añade esta clase
+ * es la rejilla interna de cuatro columnas; el borde, el foco visible, la
+ * tipografía y los estados ya los pone el componente compartido. */
 .constructor__recuperar {
+  padding: var(--ceiba-space-2) var(--ceiba-space-3);
+  text-align: left;
+  font-size: var(--ceiba-text-sm);
+  color: var(--ceiba-text-muted);
+}
+
+.constructor__entrada-rejilla {
   display: grid;
   grid-template-columns: 58px minmax(0, 1fr) auto auto;
   gap: var(--ceiba-space-3);
   align-items: center;
   width: 100%;
-  padding: var(--ceiba-space-2) var(--ceiba-space-3);
-  background: var(--ceiba-surface);
-  border: 1px solid var(--ceiba-border);
-  border-radius: var(--ceiba-radius-md);
-  color: var(--ceiba-text-muted);
-  font-family: inherit;
-  font-size: var(--ceiba-text-sm);
-  text-align: left;
-  cursor: pointer;
 }
 
 .constructor__recuperar:hover {
@@ -379,7 +387,7 @@ async function enviar(): Promise<void> {
     padding: var(--ceiba-space-3);
   }
 
-  .constructor__recuperar {
+  .constructor__entrada-rejilla {
     grid-template-columns: 52px minmax(0, 1fr) auto;
   }
 

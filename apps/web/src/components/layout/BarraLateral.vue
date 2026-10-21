@@ -1,34 +1,65 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import { RouterLink, useRoute } from 'vue-router'
-import { NOMBRES_RUTAS } from '@/router/nombres'
-import { useWorkspacesStore } from '@/stores/workspaces'
-
-const ruta = useRoute()
-const storeWorkspaces = useWorkspacesStore()
-
-const workspaceActivo = computed(() => storeWorkspaces.activo)
+/**
+ * Navegación lateral del estudio.
+ *
+ * DOS CORRECCIONES DE FASE 4, las dos por el mismo motivo —decía cosas que no
+ * podía saber—:
+ *
+ *  1. **El «workspace activo» sale de la URL, no de un campo inventado.**
+ *     Antes leía `storeWorkspaces.activo`, que no existe en el almacén
+ *     (`stores/workspaces.ts` expone `lista`, `porId(id)` y `estaVacia`), así
+ *     que el bloque entero nunca se pintaba. Ahora el workspace activo es,
+ *     literalmente, el de la ruta: `params.workspaceId` resuelto con
+ *     `porId()`. Si no estamos dentro de un workspace, no hay bloque.
+ *
+ *  2. **Ya no se anuncia un rol que la API no manda.** Pintaba
+ *     `workspaceActivo.myRole ?? 'editor'`, y `GET /api/v1/workspaces`
+ *     **no devuelve `myRole`** (`workspace.controller.ts`, `vistaWorkspace()`:
+ *     id, slug, name, description, ownerUserId, status, createdAt, updatedAt).
+ *     El `?? 'editor'` convertía «no lo sé» en «eres editor», que es
+ *     justamente la mentira que no puede permitirse una interfaz que habla de
+ *     permisos. El rol real se consulta donde existe de verdad:
+ *     `GET /workspaces/:id/settings` → `currentUserRole`, en la vista de
+ *     Configuración.
+ *
+ * Todo valor visual sale de un token `--ceiba-*` de `@ceiba/brand`; antes usaba
+ * 46 variables (`--espacio-*`, `--color-*`…) que no existen en ningún sitio, y
+ * el navegador descartaba las declaraciones una a una.
+ */
+import { computed } from 'vue';
+import { RouterLink, useRoute } from 'vue-router';
+import { NOMBRES_RUTAS } from '@/router/nombres';
+import { usarAlmacenDeWorkspaces } from '@/stores/workspaces';
 
 interface ElementoNav {
-  etiqueta: string
-  nombreRuta: string
-  activo: boolean
+  readonly etiqueta: string;
+  readonly nombreRuta: string;
+  readonly activo: boolean;
 }
+
+const ruta = useRoute();
+const workspaces = usarAlmacenDeWorkspaces();
+
+/** El workspace activo es el de la URL; si no hay, no hay. */
+const workspaceActivo = computed(() => {
+  const id = ruta.params['workspaceId'];
+  if (typeof id !== 'string' || id.length === 0) return null;
+  return workspaces.porId(id);
+});
 
 const elementosPrincipales = computed<ElementoNav[]>(() => [
   {
     etiqueta: 'Espacios de trabajo',
     nombreRuta: NOMBRES_RUTAS.WORKSPACES,
     activo:
-      ruta.name === NOMBRES_RUTAS.WORKSPACES ||
-      ruta.name === NOMBRES_RUTAS.WORKSPACE_DETALLE,
+      ruta.name === NOMBRES_RUTAS.WORKSPACES || ruta.name === NOMBRES_RUTAS.WORKSPACE_DETALLE,
   },
   {
     etiqueta: 'Constructor HTTP',
     nombreRuta: NOMBRES_RUTAS.CONSTRUCTOR,
     activo: ruta.name === NOMBRES_RUTAS.CONSTRUCTOR,
   },
-])
+]);
 
 const modulosPlataforma = computed<ElementoNav[]>(() => [
   {
@@ -57,67 +88,71 @@ const modulosPlataforma = computed<ElementoNav[]>(() => [
     activo: ruta.name === NOMBRES_RUTAS.IMPORTAR,
   },
   {
-    etiqueta: 'Configuración y Colaboración',
+    etiqueta: 'Configuración y colaboración',
     nombreRuta: NOMBRES_RUTAS.CONFIGURACION,
     activo: ruta.name === NOMBRES_RUTAS.CONFIGURACION,
   },
-])
+]);
 </script>
 
 <template>
   <aside class="barra-lateral" aria-label="Navegación principal">
-    <div class="barra-lateral__seccion">
-      <h2 class="barra-lateral__titulo">Navegación</h2>
+    <nav class="barra-lateral__seccion" aria-labelledby="barra-lateral-navegacion">
+      <h2 id="barra-lateral-navegacion" class="barra-lateral__titulo">Navegación</h2>
       <ul class="barra-lateral__lista">
         <li v-for="item in elementosPrincipales" :key="item.nombreRuta">
           <RouterLink
             :to="{ name: item.nombreRuta }"
             class="barra-lateral__enlace"
             :class="{ 'barra-lateral__enlace--activo': item.activo }"
+            :aria-current="item.activo ? 'page' : undefined"
           >
             <span class="barra-lateral__indicador" aria-hidden="true"></span>
             <span>{{ item.etiqueta }}</span>
           </RouterLink>
         </li>
       </ul>
-    </div>
+    </nav>
 
     <div v-if="workspaceActivo" class="barra-lateral__seccion">
-      <h2 class="barra-lateral__titulo">Workspace activo</h2>
+      <h2 id="barra-lateral-workspace" class="barra-lateral__titulo">Workspace activo</h2>
       <RouterLink
         :to="{
           name: NOMBRES_RUTAS.WORKSPACE_DETALLE,
           params: { workspaceId: workspaceActivo.id },
         }"
         class="barra-lateral__workspace"
+        :aria-label="`Abrir el workspace ${workspaceActivo.name}`"
       >
         <span class="barra-lateral__ws-inicial" aria-hidden="true">
           {{ workspaceActivo.name.charAt(0).toUpperCase() }}
         </span>
         <span class="barra-lateral__ws-texto">
           <span class="barra-lateral__ws-nombre">{{ workspaceActivo.name }}</span>
-          <span class="barra-lateral__ws-slug">
-            {{ workspaceActivo.slug }} · {{ workspaceActivo.myRole === 'viewer' ? 'Solo mostrar' : (workspaceActivo.myRole ?? 'editor') }}
-          </span>
+          <code class="barra-lateral__ws-slug">{{ workspaceActivo.slug }}</code>
         </span>
       </RouterLink>
     </div>
 
-    <div class="barra-lateral__seccion barra-lateral__seccion--modulos">
-      <h2 class="barra-lateral__titulo">Módulos del Estudio</h2>
+    <nav
+      class="barra-lateral__seccion barra-lateral__seccion--modulos"
+      aria-labelledby="barra-lateral-modulos"
+    >
+      <h2 id="barra-lateral-modulos" class="barra-lateral__titulo">Módulos del estudio</h2>
       <ul class="barra-lateral__lista">
-        <li v-for="mod in modulosPlataforma" :key="mod.nombreRuta">
+        <li v-for="modulo in modulosPlataforma" :key="modulo.nombreRuta">
           <RouterLink
-            :to="{ name: mod.nombreRuta }"
+            :to="{ name: modulo.nombreRuta }"
             class="barra-lateral__enlace"
-            :class="{ 'barra-lateral__enlace--activo': mod.activo }"
+            :class="{ 'barra-lateral__enlace--activo': modulo.activo }"
+            :aria-current="modulo.activo ? 'page' : undefined"
           >
             <span class="barra-lateral__indicador" aria-hidden="true"></span>
-            <span>{{ mod.etiqueta }}</span>
+            <span>{{ modulo.etiqueta }}</span>
           </RouterLink>
         </li>
       </ul>
-    </div>
+    </nav>
   </aside>
 </template>
 
@@ -125,35 +160,35 @@ const modulosPlataforma = computed<ElementoNav[]>(() => [
 .barra-lateral {
   width: 248px;
   flex-shrink: 0;
-  background-color: var(--color-superficie-1);
-  border-right: 1px solid var(--color-borde-sutil);
-  padding: var(--espacio-4) var(--espacio-3);
+  background: var(--ceiba-surface);
+  border-right: 1px solid var(--ceiba-border);
+  padding: var(--ceiba-space-4) var(--ceiba-space-3);
   display: flex;
   flex-direction: column;
-  gap: var(--espacio-6);
+  gap: var(--ceiba-space-6);
   overflow-y: auto;
 }
 
 .barra-lateral__seccion {
   display: flex;
   flex-direction: column;
-  gap: var(--espacio-2);
+  gap: var(--ceiba-space-2);
 }
 
 .barra-lateral__seccion--modulos {
   margin-top: auto;
-  padding-top: var(--espacio-4);
-  border-top: 1px solid var(--color-borde-sutil);
+  padding-top: var(--ceiba-space-4);
+  border-top: 1px solid var(--ceiba-border);
 }
 
 .barra-lateral__titulo {
   margin: 0;
-  padding: 0 var(--espacio-2);
-  font-size: var(--tamano-xs);
-  font-weight: var(--peso-semibold);
+  padding: 0 var(--ceiba-space-2);
+  font-size: var(--ceiba-text-xs);
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--color-texto-atenuado);
+  color: var(--ceiba-text-faint);
 }
 
 .barra-lateral__lista {
@@ -162,73 +197,73 @@ const modulosPlataforma = computed<ElementoNav[]>(() => [
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--ceiba-space-1);
 }
 
 .barra-lateral__enlace {
   display: flex;
   align-items: center;
-  gap: var(--espacio-2);
-  padding: var(--espacio-2) var(--espacio-3);
-  border-radius: var(--radio-md);
-  color: var(--color-texto-secundario);
-  font-size: var(--tamano-sm);
-  font-weight: var(--peso-medio);
+  gap: var(--ceiba-space-2);
+  padding: var(--ceiba-space-2) var(--ceiba-space-3);
+  border-radius: var(--ceiba-radius-md);
+  color: var(--ceiba-text-muted);
+  font-size: var(--ceiba-text-sm);
+  font-weight: 500;
   text-decoration: none;
   transition:
-    background-color var(--transicion-rapida),
-    color var(--transicion-rapida);
+    background-color var(--ceiba-duration-fast) var(--ceiba-ease),
+    color var(--ceiba-duration-fast) var(--ceiba-ease);
 }
 
 .barra-lateral__enlace:hover {
-  background-color: var(--color-superficie-2);
-  color: var(--color-texto-primario);
+  background: var(--ceiba-surface-raised);
+  color: var(--ceiba-text);
   text-decoration: none;
 }
 
 .barra-lateral__enlace--activo {
-  background-color: var(--color-superficie-2);
-  color: var(--color-texto-primario);
-  font-weight: var(--peso-semibold);
+  background: var(--ceiba-surface-raised);
+  color: var(--ceiba-text);
+  font-weight: 600;
 }
 
 .barra-lateral__indicador {
   width: 6px;
   height: 6px;
-  border-radius: 999px;
-  background-color: transparent;
-  transition: background-color var(--transicion-rapida);
+  border-radius: var(--ceiba-radius-pill);
+  background: transparent;
+  transition: background-color var(--ceiba-duration-fast) var(--ceiba-ease);
 }
 
 .barra-lateral__enlace--activo .barra-lateral__indicador {
-  background-color: var(--color-acento-primario);
+  background: var(--ceiba-accent);
 }
 
 .barra-lateral__workspace {
   display: flex;
   align-items: center;
-  gap: var(--espacio-3);
-  padding: var(--espacio-2) var(--espacio-3);
-  border-radius: var(--radio-md);
-  background-color: var(--color-superficie-2);
-  border: 1px solid var(--color-borde-sutil);
+  gap: var(--ceiba-space-3);
+  padding: var(--ceiba-space-2) var(--ceiba-space-3);
+  border-radius: var(--ceiba-radius-md);
+  background: var(--ceiba-surface-raised);
+  border: 1px solid var(--ceiba-border);
   text-decoration: none;
-  color: var(--color-texto-primario);
+  color: var(--ceiba-text);
 }
 
 .barra-lateral__workspace:hover {
-  border-color: var(--color-borde-fuerte);
+  border-color: var(--ceiba-border-strong);
   text-decoration: none;
 }
 
 .barra-lateral__ws-inicial {
   width: 28px;
   height: 28px;
-  border-radius: var(--radio-sm);
-  background-color: var(--color-acento-primario);
-  color: var(--color-texto-sobre-acento);
-  font-weight: var(--peso-bold);
-  font-size: var(--tamano-sm);
+  border-radius: var(--ceiba-radius-sm);
+  background: var(--ceiba-accent);
+  color: var(--ceiba-on-accent);
+  font-weight: 700;
+  font-size: var(--ceiba-text-sm);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -242,19 +277,27 @@ const modulosPlataforma = computed<ElementoNav[]>(() => [
 }
 
 .barra-lateral__ws-nombre {
-  font-size: var(--tamano-sm);
-  font-weight: var(--peso-semibold);
+  font-size: var(--ceiba-text-sm);
+  font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .barra-lateral__ws-slug {
-  font-size: var(--tamano-xs);
-  font-family: var(--fuente-mono);
-  color: var(--color-texto-atenuado);
+  font-size: var(--ceiba-text-xs);
+  font-family: var(--ceiba-font-mono);
+  color: var(--ceiba-text-faint);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+@media (max-width: 860px) {
+  .barra-lateral {
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--ceiba-border);
+  }
 }
 </style>

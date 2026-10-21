@@ -4,6 +4,11 @@ import { NOMBRES_RUTAS } from './nombres'
 declare module 'vue-router' {
   interface RouteMeta {
     publica?: boolean
+    /**
+     * Forma equivalente heredada de la fase 1: `false` declara ruta pública.
+     * El guard acepta las dos y sigue denegando por omisión (`guardas.ts`).
+     */
+    requiereSesion?: boolean
     soloInvitado?: boolean
     titulo?: string
     sinArmazon?: boolean
@@ -114,7 +119,15 @@ export const rutas: RouteRecordRaw[] = [
     path: '/invitacion/:token',
     name: NOMBRES_RUTAS.INVITACION,
     component: () => import('@/views/VistaDeInvitacion.vue'),
+    props: true,
     meta: {
+      // Pública a propósito: a quien recibe la invitación por correo todavía
+      // no se le ha pedido que tenga cuenta. Sin esto el guard lo mandaba al
+      // login y el enlace de invitación no servía para nada. La vista decide
+      // qué puede hacer según haya sesión o no; la autorización real la hace
+      // la API al aceptar (`POST /invitations/:token/accept`).
+      publica: true,
+      sinArmazon: true,
       titulo: 'Invitación a workspace — CEIBA',
     },
   },

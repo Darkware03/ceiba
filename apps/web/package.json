@@ -16,7 +16,9 @@
     "typecheck": "vue-tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "check:no-token-storage": "node scripts/check-no-token-storage.ts"
+    "check:no-token-storage": "node scripts/check-no-token-storage.ts",
+    "check:estandar-visual": "node scripts/check-estandar-visual.ts",
+    "check": "node scripts/check-no-token-storage.ts && node scripts/check-estandar-visual.ts"
   },
   "dependencies": {
     "@codemirror/commands": "6.11.1",
