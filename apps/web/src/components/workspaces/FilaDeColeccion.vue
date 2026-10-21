@@ -19,10 +19,20 @@
  * pondría esa prueba en rojo por un cambio puramente de navegación.
  *
  * El botón navega igual, es accesible y tiene nombre propio, así que el fallo
- * del cliente queda arreglado. Queda anotado como recomendación para darkware:
- * relajar esa aserción y promover el nombre a `RouterLink`. Las filas de
- * **petición** (`components/peticiones/FilaDePeticion.vue`), que son nuevas y
- * no arrastran esa aserción, sí usan `RouterLink`.
+ * del cliente queda arreglado. Las filas de **petición**
+ * (`components/peticiones/FilaDePeticion.vue`), que son nuevas y no arrastran
+ * esa aserción, sí usan `RouterLink`.
+ *
+ * DARKWARE LO INTENTÓ Y LO REVIRTIÓ. Dejo constancia para que nadie repita el
+ * camino: relajar la aserción de `colecciones.test.ts` **no basta**. Al
+ * promover esto a `RouterLink` cae `peticiones.test.ts`, que busca el control
+ * por `findAll('button')`; y reescribir esa búsqueda contra `RouterLinkStub`
+ * tampoco funciona a la primera, porque el stub no expone `aria-label` donde
+ * se espera. Tres intentos, tres veces 122/123.
+ *
+ * La suite verde vale más que la mejora: se revirtió al estado de `4ce556b`.
+ * Hacerlo bien exige tocar **las dos** pruebas a la vez y entender dónde deja
+ * el stub sus atributos —trabajo pequeño pero no de un minuto—.
  */
 import CeibaBoton from '@/components/ui/CeibaBoton.vue';
 import type { Coleccion } from '@/api/tipos';
