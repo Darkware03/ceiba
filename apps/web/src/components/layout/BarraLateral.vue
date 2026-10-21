@@ -25,9 +25,25 @@
  * Todo valor visual sale de un token `--ceiba-*` de `@ceiba/brand`; antes usaba
  * 46 variables (`--espacio-*`, `--color-*`…) que no existen en ningún sitio, y
  * el navegador descartaba las declaraciones una a una.
+ *
+ * AÑADIDO EN FASE 7 (P3): el árbol.
+ *
+ * Las dos correcciones de arriba siguen valiendo tal cual y **no se han
+ * tocado**: el workspace activo se sigue deduciendo de `params.workspaceId`
+ * con `porId()`, y aquí se sigue sin anunciar ningún rol. Lo que cambia es que
+ * debajo de la navegación estática aparece `ArbolDeNavegacion`, que es lo que
+ * pedía el cliente en su punto 3: workspaces → colecciones → peticiones.
+ *
+ * La navegación del árbol se resuelve **aquí** y no dentro del árbol: el árbol
+ * emite `navegar` con el destino y este componente hace el `push`. Así el
+ * componente del árbol se monta en una prueba sin instalar un router entero,
+ * que es la misma decisión que ya tomaron `VistaDeWorkspace.vue` y
+ * `VistaDeColeccion.vue` con sus `props`.
  */
 import { computed } from 'vue';
-import { RouterLink, useRoute } from 'vue-router';
+import { RouterLink, useRoute, useRouter } from 'vue-router';
+import type { RouteLocationRaw } from 'vue-router';
+import ArbolDeNavegacion from './ArbolDeNavegacion.vue';
 import { NOMBRES_RUTAS } from '@/router/nombres';
 import { usarAlmacenDeWorkspaces } from '@/stores/workspaces';
 
@@ -38,13 +54,45 @@ interface ElementoNav {
 }
 
 const ruta = useRoute();
+const enrutador = useRouter();
 const workspaces = usarAlmacenDeWorkspaces();
+
+function irA(destino: RouteLocationRaw): void {
+  void enrutador.push(destino);
+}
 
 /** El workspace activo es el de la URL; si no hay, no hay. */
 const workspaceActivo = computed(() => {
   const id = ruta.params['workspaceId'];
   if (typeof id !== 'string' || id.length === 0) return null;
   return workspaces.porId(id);
+});
+
+/*
+ * Identificadores de la ruta para el árbol.
+ *
+ * El árbol **no** llama a `useRoute()`: se monta en pruebas sin router y
+ * `useRoute()` devuelve `undefined` ahí. Quien conoce la ruta es este
+ * componente, que vive dentro del armazón; el árbol recibe tres cadenas.
+ *
+ * Ojo con `workspaceDeLaRuta` frente a `workspaceActivo`: el primero es el id
+ * crudo de la URL y el segundo es el workspace **ya cargado**. Para marcar un
+ * nodo del árbol hace falta el id, exista o no todavía en la lista; usar
+ * `workspaceActivo?.id` dejaría el nodo sin marcar durante la primera carga.
+ */
+const workspaceDeLaRuta = computed(() => {
+  const id = ruta.params['workspaceId'];
+  return typeof id === 'string' && id.length > 0 ? id : null;
+});
+
+const coleccionDeLaRuta = computed(() => {
+  const id = ruta.params['collectionId'];
+  return typeof id === 'string' && id.length > 0 ? id : null;
+});
+
+const peticionDeLaRuta = computed(() => {
+  const id = ruta.query['peticion'];
+  return typeof id === 'string' && id.length > 0 ? id : null;
 });
 
 const elementosPrincipales = computed<ElementoNav[]>(() => [
@@ -114,6 +162,19 @@ const modulosPlataforma = computed<ElementoNav[]>(() => [
       </ul>
     </nav>
 
+    <section
+      class="barra-lateral__seccion barra-lateral__seccion--arbol"
+      aria-labelledby="barra-lateral-arbol"
+    >
+      <h2 id="barra-lateral-arbol" class="barra-lateral__titulo">Explorador</h2>
+      <ArbolDeNavegacion
+        :workspace-activo="workspaceDeLaRuta"
+        :coleccion-activa="coleccionDeLaRuta"
+        :peticion-activa="peticionDeLaRuta"
+        @navegar="irA"
+      />
+    </section>
+
     <div v-if="workspaceActivo" class="barra-lateral__seccion">
       <h2 id="barra-lateral-workspace" class="barra-lateral__titulo">Workspace activo</h2>
       <RouterLink
@@ -179,6 +240,18 @@ const modulosPlataforma = computed<ElementoNav[]>(() => [
   margin-top: auto;
   padding-top: var(--ceiba-space-4);
   border-top: 1px solid var(--ceiba-border);
+}
+
+/*
+ * El árbol es lo único que crece sin límite en esta columna, así que es lo
+ * único que se encoge y desplaza. Sin `min-height: 0` un hijo con
+ * `overflow-y: auto` dentro de un contenedor flex no se encoge nunca y empuja
+ * los «Módulos del estudio» fuera de la pantalla.
+ */
+.barra-lateral__seccion--arbol {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .barra-lateral__titulo {

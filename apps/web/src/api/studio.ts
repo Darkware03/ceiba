@@ -24,7 +24,7 @@
  *     un fallo pasajero. No se inventa el endpoint.
  */
 import { clienteApi } from './cliente';
-import { ErrorDeHueco } from './errores';
+import { ErrorDeApi, ErrorDeHueco } from './errores';
 
 export type RolColaboracion = 'owner' | 'admin' | 'editor' | 'executor' | 'viewer';
 
@@ -890,7 +890,241 @@ export async function aceptarInvitacionPorToken(token: string): Promise<{
   };
 }
 
+/* ==========================================================================
+ * P7 · ENLACES DE COMPARTICIÓN DE COLECCIONES
+ *
+ * EL HECHO QUE MANDA SOBRE ESTE BLOQUE, medido el 2026-10-21 sobre el árbol
+ * vivo y no supuesto:
+ *
+ *   $ grep -rn "collections/:collectionId/invitations" apps/api/src
+ *   (0 líneas)
+ *
+ * Las invitaciones de colección del BRIEF-FASE7 §2.4 **no existían cuando se
+ * escribió esto**. Lo que SÍ existe, completo y con pruebas, es el módulo
+ * `sharing`:
+ *
+ *   POST   /collections/:collectionId/shares   -> { share, accessCode, aviso }
+ *   GET    /collections/:collectionId/shares   -> { shares, visibility }
+ *   POST   /shares/:sharedLinkId/revoke
+ *
+ * y su `share.url` **ya es absoluta y pegable** (`sharing-admin.service.ts:470`
+ * la construye como `<urlPublica>/s/<slug>`), que es exactamente la prueba de
+ * aceptación que fija el §2.4: «un enlace que se pueda pegar en un chat».
+ *
+ * DECISIÓN: cliente de **doble vía**. Se intenta primero el contrato §2.4 y,
+ * si la API contesta que esa ruta no está (404/405/501), se cae al módulo
+ * `sharing`. Así:
+ *
+ *   - la pantalla **funciona hoy**, sin esperar al ámbito B;
+ *   - cuando el ámbito B publique su ruta, la web la usa **sola**, sin tocar
+ *     una línea aquí;
+ *   - no se reescribe nada de lo que ya existía.
+ *
+ * Sólo se degrada ante «esa ruta no está». Un 403 o un 422 **se propagan**:
+ * un «no tienes permiso» no puede convertirse en un reintento por otra puerta
+ * que acabe diciendo otra cosa.
+ * ====================================================================== */
+
+/** Lo que la interfaz necesita de un enlace, venga de donde venga. */
+export interface EnlaceDeColeccion {
+  readonly id: string;
+  /** Absoluta y pegable en un chat. Nunca vacía. */
+  readonly url: string;
+  readonly permiso: string;
+  readonly etiquetaDePermiso: string;
+  readonly expiraEl: string | null;
+  readonly revocado: boolean;
+  /** Qué familia de rutas la sirvió. Se pinta: el usuario tiene derecho a saberlo. */
+  readonly origen: 'invitations' | 'shares';
+  /**
+   * Código de acceso en claro. **Sólo al crear y sólo una vez**: el servidor
+   * no lo guarda en claro en ninguna columna y no hay ruta que lo devuelva
+   * después. `null` si el enlace no lleva código.
+   */
+  readonly codigoDeAcceso: string | null;
+  /** Aviso textual del servidor, si lo mandó. No se reescribe. */
+  readonly aviso: string | null;
+}
+
+export interface OpcionesDeEnlaceDeColeccion {
+  /** `viewer` | `viewer_export` | `executor` (los de `share-policy.ts:74`). */
+  readonly permiso: string;
+  /** 1, 7 o 30. El tope de 30 lo impone el servidor en las de workspace. */
+  readonly dias: number;
+  /** Si `true`, el servidor genera un código de un solo uso visible una vez. */
+  readonly conCodigo: boolean;
+}
+
+export const PERMISOS_DE_COLECCION = [
+  { valor: 'viewer', etiqueta: 'Solo lectura' },
+  { valor: 'viewer_export', etiqueta: 'Lectura y exportación' },
+  { valor: 'executor', etiqueta: 'Lectura y ejecución' },
+] as const;
+
+export function etiquetaDePermiso(valor: string): string {
+  return PERMISOS_DE_COLECCION.find((p) => p.valor === valor)?.etiqueta ?? valor;
+}
+
+/** `true` sólo si el fallo significa «esa ruta todavía no existe». */
+function esRutaAusente(error: unknown): boolean {
+  return error instanceof ErrorDeApi && [404, 405, 501].includes(error.estado);
+}
+
+function aIso(dias: number): string {
+  return new Date(Date.now() + dias * 24 * 60 * 60 * 1000).toISOString();
+}
+
+function comoObjeto(valor: unknown): Record<string, unknown> {
+  return typeof valor === 'object' && valor !== null && !Array.isArray(valor)
+    ? (valor as Record<string, unknown>)
+    : {};
+}
+
+function cadena(valor: unknown): string {
+  return typeof valor === 'string' ? valor : '';
+}
+
+/** Absolutiza un `invitePath` relativo con el origen de la pestaña actual. */
+function absoluta(posibleUrl: string, posibleRuta: string): string {
+  if (posibleUrl.length > 0) return posibleUrl;
+  if (posibleRuta.length === 0) return '';
+  if (/^https?:\/\//u.test(posibleRuta)) return posibleRuta;
+  const origen = globalThis.location?.origin ?? '';
+  return `${origen}${posibleRuta.startsWith('/') ? '' : '/'}${posibleRuta}`;
+}
+
+/**
+ * Normaliza una fila del módulo `sharing`.
+ *
+ * `urlPreferida` recoge el `inviteUrl` que el ámbito B añadió en la fase 7 al
+ * nivel superior de la respuesta de creación. Es **aditivo** y vale lo mismo
+ * que `share.url` —así lo dejaron escrito en `sharing-admin.controller.ts`—,
+ * de modo que el mismo campo sirve para workspaces y para colecciones. Se lee
+ * si viene y se cae a `share.url` si no: las dos formas quedan soportadas y
+ * no hay que sincronizar despliegues.
+ */
+function desdeShare(
+  crudo: unknown,
+  codigo: string | null,
+  aviso: string | null,
+  urlPreferida = '',
+): EnlaceDeColeccion {
+  const s = comoObjeto(crudo);
+  const permiso = cadena(s['permission']) || 'viewer';
+  const slug = cadena(s['slug']);
+  return {
+    id: cadena(s['id']),
+    url: absoluta(urlPreferida || cadena(s['url']), slug.length > 0 ? `/s/${slug}` : ''),
+    permiso,
+    etiquetaDePermiso: etiquetaDePermiso(permiso),
+    expiraEl: typeof s['expiresAt'] === 'string' ? s['expiresAt'] : null,
+    revocado: s['revokedAt'] !== null && s['revokedAt'] !== undefined,
+    origen: 'shares',
+    codigoDeAcceso: codigo,
+    aviso,
+  };
+}
+
+/** Normaliza una fila del contrato §2.4, si algún día llega. */
+function desdeInvitacion(crudo: unknown): EnlaceDeColeccion {
+  const i = comoObjeto(crudo);
+  const permiso = cadena(i['role']) || cadena(i['permission']) || 'viewer';
+  return {
+    id: cadena(i['id']),
+    url: absoluta(cadena(i['inviteUrl']), cadena(i['invitePath'])),
+    permiso,
+    etiquetaDePermiso: etiquetaDePermiso(permiso),
+    expiraEl: typeof i['expiresAt'] === 'string' ? i['expiresAt'] : null,
+    revocado: cadena(i['status']) === 'revoked',
+    origen: 'invitations',
+    codigoDeAcceso: null,
+    aviso: null,
+  };
+}
+
+/**
+ * Crea un enlace de compartición para una colección y lo devuelve **pegable**.
+ *
+ * Una sola llamada desde el punto de vista de quien la usa: es lo que permite
+ * que el diálogo cumpla «dos pulsaciones hasta el portapapeles».
+ */
+export async function crearEnlaceDeColeccion(
+  collectionId: string,
+  opciones: OpcionesDeEnlaceDeColeccion,
+): Promise<EnlaceDeColeccion> {
+  const ruta = encodeURIComponent(collectionId);
+
+  try {
+    const res = await clienteApi.post<unknown>(`/collections/${ruta}/invitations`, {
+      role: opciones.permiso,
+      expiresInDays: opciones.dias,
+    });
+    const sobre = comoObjeto(res);
+    const enlace = desdeInvitacion(sobre['invitation'] ?? sobre);
+    // Un 200 con un enlace vacío no es un éxito: se trata como ausencia y se
+    // usa la vía que sí funciona, en vez de copiar '' al portapapeles.
+    if (enlace.url.length > 0) return enlace;
+  } catch (error) {
+    if (!esRutaAusente(error)) throw error;
+  }
+
+  const res = await clienteApi.post<unknown>(`/collections/${ruta}/shares`, {
+    permission: opciones.permiso,
+    requiresAccessCode: opciones.conCodigo,
+    expiresAt: aIso(opciones.dias),
+  });
+  const sobre = comoObjeto(res);
+  return desdeShare(
+    sobre['share'] ?? sobre,
+    typeof sobre['accessCode'] === 'string' ? sobre['accessCode'] : null,
+    typeof sobre['aviso'] === 'string' ? sobre['aviso'] : null,
+    cadena(sobre['inviteUrl']),
+  );
+}
+
+/** Enlaces vigentes de una colección, por la vía que esté disponible. */
+export async function listarEnlacesDeColeccion(
+  collectionId: string,
+): Promise<EnlaceDeColeccion[]> {
+  const ruta = encodeURIComponent(collectionId);
+
+  try {
+    const res = await clienteApi.get<unknown>(`/collections/${ruta}/invitations`);
+    const sobre = comoObjeto(res);
+    const lista = Array.isArray(res) ? res : sobre['invitations'];
+    if (Array.isArray(lista)) return lista.map(desdeInvitacion);
+  } catch (error) {
+    if (!esRutaAusente(error)) throw error;
+  }
+
+  const res = await clienteApi.get<unknown>(`/collections/${ruta}/shares`);
+  const sobre = comoObjeto(res);
+  const lista = Array.isArray(res) ? res : sobre['shares'];
+  return Array.isArray(lista) ? lista.map((s) => desdeShare(s, null, null)) : [];
+}
+
+/**
+ * Revoca un enlace. La ruta depende de **quién lo sirvió**, por eso
+ * `EnlaceDeColeccion` arrastra `origen`: adivinarlo aquí sería mandar un
+ * `DELETE` a una ruta que no existe y enseñar un 404 como si fuera un fallo.
+ */
+export async function revocarEnlaceDeColeccion(
+  collectionId: string,
+  enlace: Pick<EnlaceDeColeccion, 'id' | 'origen'>,
+): Promise<void> {
+  if (enlace.origen === 'invitations') {
+    await clienteApi.delete(
+      `/collections/${encodeURIComponent(collectionId)}/invitations/${encodeURIComponent(enlace.id)}`,
+    );
+    return;
+  }
+  await clienteApi.post(`/shares/${encodeURIComponent(enlace.id)}/revoke`);
+}
+
 export const apiStudio = {
+  crearEnlaceDeColeccion,
+  listarEnlacesDeColeccion,
+  revocarEnlaceDeColeccion,
   listarEntornos,
   crearEntorno,
   actualizarEntorno,

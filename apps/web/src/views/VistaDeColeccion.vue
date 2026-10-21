@@ -29,6 +29,8 @@
  */
 import { computed, onMounted, ref, watch } from 'vue';
 import { CeibaLoadingScreen } from '@ceiba/brand';
+import BotonDeCompartir from '@/components/comparticion/BotonDeCompartir.vue';
+import DialogoDeComparticion from '@/components/comparticion/DialogoDeComparticion.vue';
 import CeibaAviso from '@/components/ui/CeibaAviso.vue';
 import CeibaBoton from '@/components/ui/CeibaBoton.vue';
 import CeibaVacio from '@/components/ui/CeibaVacio.vue';
@@ -59,6 +61,8 @@ const aRenombrar = ref<Peticion | null>(null);
 const aBorrar = ref<Peticion | null>(null);
 const errorDeDialogo = ref<string | null>(null);
 const recopiando = ref(false);
+/** P7: ¿está abierto el diálogo de compartir esta colección? */
+const compartiendo = ref(false);
 
 const lista = computed(() => almacen.deColeccion(props.collectionId));
 const grupos = computed(() => almacen.porCarpeta(props.collectionId));
@@ -129,6 +133,7 @@ function cerrarDialogos(): void {
   creando.value = false;
   aRenombrar.value = null;
   aBorrar.value = null;
+  compartiendo.value = false;
   errorDeDialogo.value = null;
 }
 
@@ -216,8 +221,28 @@ async function recopiar(): Promise<void> {
           {{ coleccion.description }}
         </p>
       </div>
-      <CeibaBoton variante="primario" @click="abrirCreacion">Nueva petición</CeibaBoton>
+      <div class="coleccion__acciones">
+        <!--
+          P7: el icono de compartir, primera de las dos pulsaciones hasta tener
+          el enlace en el portapapeles. Va **antes** de la acción principal
+          para no empujarla fuera de la cabecera al envolver en pantallas
+          estrechas.
+        -->
+        <BotonDeCompartir
+          :nombre="`la colección ${coleccion?.name ?? 'actual'}`"
+          @click="compartiendo = true"
+        />
+        <CeibaBoton variante="primario" @click="abrirCreacion">Nueva petición</CeibaBoton>
+      </div>
     </header>
+
+    <DialogoDeComparticion
+      :abierto="compartiendo"
+      tipo="coleccion"
+      :recurso-id="collectionId"
+      :nombre="coleccion?.name ?? 'esta colección'"
+      @cerrar="cerrarDialogos"
+    />
 
     <CeibaAviso v-if="errorDeColeccion" tono="aviso" titulo="Colección no disponible">
       {{ errorDeColeccion }}
@@ -373,6 +398,13 @@ async function recopiar(): Promise<void> {
   flex-direction: column;
   gap: var(--ceiba-space-1);
   min-width: 0;
+}
+
+.coleccion__acciones {
+  display: flex;
+  align-items: center;
+  gap: var(--ceiba-space-2);
+  flex-shrink: 0;
 }
 
 .coleccion__slug {

@@ -22,6 +22,8 @@
 import { computed, inject, onMounted, ref, watch } from 'vue';
 import { routerKey } from 'vue-router';
 import { CeibaLoadingScreen } from '@ceiba/brand';
+import BotonDeCompartir from '@/components/comparticion/BotonDeCompartir.vue';
+import DialogoDeComparticion from '@/components/comparticion/DialogoDeComparticion.vue';
 import CeibaAviso from '@/components/ui/CeibaAviso.vue';
 import CeibaBoton from '@/components/ui/CeibaBoton.vue';
 import CeibaVacio from '@/components/ui/CeibaVacio.vue';
@@ -60,6 +62,8 @@ const creando = ref(false);
 const aRenombrar = ref<Coleccion | null>(null);
 const aBorrar = ref<Coleccion | null>(null);
 const errorDeDialogo = ref<string | null>(null);
+/** P7: ¿está abierto el diálogo de compartir este workspace? */
+const compartiendo = ref(false);
 
 const workspace = computed(() => workspaces.porId(props.workspaceId));
 const lista = computed(() => almacen.deWorkspace(props.workspaceId));
@@ -122,6 +126,7 @@ function cerrarDialogos(): void {
   creando.value = false;
   aRenombrar.value = null;
   aBorrar.value = null;
+  compartiendo.value = false;
   errorDeDialogo.value = null;
 }
 
@@ -177,8 +182,28 @@ async function borrar(): Promise<void> {
           {{ workspace.description }}
         </p>
       </div>
-      <CeibaBoton variante="primario" @click="abrirCreacion">Nueva colección</CeibaBoton>
+      <div class="detalle__acciones">
+        <!--
+          P7: también aquí. El cliente dijo «desde su respectiva pantalla», y
+          la pantalla de UN workspace es tan «su» pantalla como la lista de
+          tarjetas: quien entra a administrar un workspace no debería tener
+          que volver atrás para encontrar el icono.
+        -->
+        <BotonDeCompartir
+          :nombre="workspace?.name ?? 'este workspace'"
+          @click="compartiendo = true"
+        />
+        <CeibaBoton variante="primario" @click="abrirCreacion">Nueva colección</CeibaBoton>
+      </div>
     </header>
+
+    <DialogoDeComparticion
+      :abierto="compartiendo"
+      tipo="workspace"
+      :recurso-id="workspaceId"
+      :nombre="workspace?.name ?? 'este workspace'"
+      @cerrar="cerrarDialogos"
+    />
 
     <CeibaAviso v-if="workspaceDesconocido" tono="aviso" titulo="Workspace no disponible">
       No aparece entre tus workspaces. Puede que no exista o que ya no tengas membresía en él.
@@ -291,6 +316,13 @@ async function borrar(): Promise<void> {
   justify-content: space-between;
   gap: var(--ceiba-space-4);
   flex-wrap: wrap;
+}
+
+.detalle__acciones {
+  display: flex;
+  align-items: center;
+  gap: var(--ceiba-space-2);
+  flex-shrink: 0;
 }
 
 .detalle__identidad {

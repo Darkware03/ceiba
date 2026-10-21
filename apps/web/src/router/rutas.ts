@@ -153,6 +153,34 @@ export const rutas: RouteRecordRaw[] = [
     },
   },
   {
+    /**
+     * Aterrizaje del enlace de colección compartida.
+     *
+     * El servidor construye la URL como `<urlPublica>/s/<publicSlug>`
+     * (`sharing-admin.service.ts:470`) y hasta ahora **no existía esta ruta**:
+     * el comodín de abajo se la comía y quien abría el enlace veía «página no
+     * encontrada». Lo declararon, por separado, los ámbitos B y D de la fase 7.
+     *
+     * Tiene que ir ANTES del comodín, que captura cualquier cosa.
+     */
+    path: '/s/:slug',
+    name: NOMBRES_RUTAS.COMPARTICION_PUBLICA,
+    component: () => import('@/views/VistaDeComparticionPublica.vue'),
+    props: true,
+    meta: {
+      // Pública a propósito, y es el punto entero de la pantalla: quien recibe
+      // el enlace en un chat **no tiene cuenta**. Sin esto el guard lo manda al
+      // login y el enlace no sirve para nada. La autorización real no la hace
+      // esta marca: la hace la API con el código de acceso y la sesión de
+      // compartición (`POST /api/v1/share/:slug/access`).
+      publica: true,
+      // Sin armazón: un lateral con «mis workspaces» no significa nada para
+      // quien no tiene ninguno.
+      sinArmazon: true,
+      titulo: 'Colección compartida — CEIBA',
+    },
+  },
+  {
     path: '/:rutaNoReconocida(.*)*',
     name: NOMBRES_RUTAS.NO_ENCONTRADO,
     component: () => import('@/views/VistaNoEncontrada.vue'),

@@ -11,6 +11,7 @@
  * lector de pantalla que enumere botones diría si no «Renombrar, Renombrar,
  * Renombrar…».
  */
+import BotonDeCompartir from '@/components/comparticion/BotonDeCompartir.vue';
 import CeibaBoton from '@/components/ui/CeibaBoton.vue';
 // Desde `router/nombres.ts` y **no** desde `router/rutas.ts`: la tabla de
 // rutas importa todas las vistas en diferido, así que tomar de ahí una simple
@@ -20,7 +21,10 @@ import type { Workspace } from '@/api/tipos';
 
 defineProps<{ workspace: Workspace }>();
 
-const emitir = defineEmits<{ renombrar: []; borrar: [] }>();
+// `compartir` es P7: el icono que el cliente pidió «desde su respectiva
+// pantalla». La tarjeta sigue sin llamar a la API ni tocar el almacén: emite y
+// la vista decide, igual que `renombrar` y `borrar`.
+const emitir = defineEmits<{ renombrar: []; borrar: []; compartir: [] }>();
 
 const formateador = new Intl.DateTimeFormat('es-ES', { dateStyle: 'medium' });
 
@@ -50,6 +54,7 @@ function fechaLegible(iso: string): string {
       </time>
 
       <div class="tarjeta__acciones">
+        <BotonDeCompartir compacto :nombre="workspace.name" @click="emitir('compartir')" />
         <CeibaBoton
           compacto
           variante="fantasma"

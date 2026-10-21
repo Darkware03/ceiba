@@ -31,9 +31,20 @@ export interface Hallazgo {
 
 /**
  * Claves que SÍ pueden persistirse. Ninguna es una credencial:
- * `ceiba.tema` es la preferencia de tema (claro/oscuro).
+ *
+ *  - `ceiba.tema` es la preferencia de tema (claro/oscuro).
+ *  - `ceiba.arbol.desplegado` son los nodos abiertos del árbol lateral
+ *    (identificadores de workspace y de colección). Se admite tras pararse a
+ *    mirar qué guarda de verdad, no por comodidad: son **los mismos
+ *    identificadores que ya van en la URL** de cada vista, así que no revela
+ *    nada que el usuario no esté enseñando ya en la barra de direcciones, y
+ *    no da acceso a nada por sí misma — la autorización la hace la API en
+ *    cada petición. Sin esta clave, el árbol se cierra entero en cada F5, que
+ *    es justo lo que el cliente pidió evitar cuando describió P3.
+ *
+ * La regla sigue siendo lista blanca: lo que no esté aquí es un hallazgo.
  */
-export const CLAVES_PERMITIDAS: readonly string[] = ['ceiba.tema'];
+export const CLAVES_PERMITIDAS: readonly string[] = ['ceiba.tema', 'ceiba.arbol.desplegado'];
 
 const EXTENSIONES = new Set(['.ts', '.vue', '.js', '.mjs', '.html']);
 

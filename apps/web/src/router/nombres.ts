@@ -39,6 +39,17 @@ export const RUTA_DOCUMENTACION = 'documentacion';
 export const RUTA_IMPORTAR = 'importar';
 export const RUTA_CONFIGURACION = 'configuracion';
 export const RUTA_INVITACION = 'invitacion';
+/**
+ * Aterrizaje de un enlace de colección compartida: `/s/:slug`.
+ *
+ * El enlace lo construye el servidor en `sharing-admin.service.ts:470` como
+ * `<urlPublica>/s/<publicSlug>`, y hasta esta ronda **no tenía dónde caer**:
+ * el comodín se lo comía y quien lo abría veía «página no encontrada». Era el
+ * hueco que declararon por separado los ámbitos B y D de la fase 7.
+ *
+ * La ruta es corta a propósito: se pega en un chat y tiene que caber.
+ */
+export const RUTA_COMPARTICION_PUBLICA = 'comparticion-publica';
 export const RUTA_NO_ENCONTRADA = 'no-encontrada';
 
 export const NOMBRES_RUTAS = {
@@ -56,6 +67,7 @@ export const NOMBRES_RUTAS = {
   IMPORTAR: RUTA_IMPORTAR,
   CONFIGURACION: RUTA_CONFIGURACION,
   INVITACION: RUTA_INVITACION,
+  COMPARTICION_PUBLICA: RUTA_COMPARTICION_PUBLICA,
   NO_ENCONTRADA: RUTA_NO_ENCONTRADA,
   /** Alias: `rutas.ts` lo escribe en masculino. Un nombre, dos puertas. */
   NO_ENCONTRADO: RUTA_NO_ENCONTRADA,

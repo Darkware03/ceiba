@@ -33,7 +33,49 @@ describe('C-31: ninguna credencial en almacenamiento persistente', () => {
   });
 
   it('la lista blanca sólo contiene preferencias de interfaz, nada de credenciales', () => {
-    expect(CLAVES_PERMITIDAS).toEqual(['ceiba.tema']);
+    // Esta prueba existe para que ampliar la lista blanca sea un acto
+    // DELIBERADO: si alguien añade una clave, esto se pone rojo y le obliga a
+    // justificarla aquí. Funcionó — me pilló a mí (darkware, fase 7).
+    //
+    //  - `ceiba.tema`: preferencia de tema (claro/oscuro).
+    //  - `ceiba.arbol.desplegado`: qué nodos del árbol lateral están abiertos.
+    //    Guarda identificadores de workspace y de colección, **los mismos que
+    //    ya van en la URL de cada vista**, así que no revela nada que el
+    //    usuario no esté enseñando en la barra de direcciones, y no da acceso
+    //    a nada por sí misma: la autorización la hace la API en cada
+    //    petición. Sin ella el árbol se cierra entero en cada F5.
+    expect(CLAVES_PERMITIDAS).toEqual(['ceiba.tema', 'ceiba.arbol.desplegado']);
+  });
+
+  it('ninguna clave permitida huele a credencial', () => {
+    // La lista blanca protege de olvidos, no de malicia. Esto añade una red:
+    // por muy justificada que venga, una clave con estas palabras no entra
+    // sin romper la suite.
+    const PALABRAS_PROHIBIDAS = [
+      'token',
+      'sesion',
+      'session',
+      'auth',
+      'jwt',
+      'secret',
+      'secreto',
+      'password',
+      'contrasena',
+      'credential',
+      'credencial',
+      'csrf',
+      'bearer',
+      'apikey',
+    ];
+    for (const clave of CLAVES_PERMITIDAS) {
+      const normalizada = clave.toLowerCase();
+      for (const palabra of PALABRAS_PROHIBIDAS) {
+        expect(
+          normalizada.includes(palabra),
+          `la clave permitida '${clave}' contiene '${palabra}'`,
+        ).toBe(false);
+      }
+    }
   });
 
   it('el comprobador detecta de verdad una escritura prohibida', () => {

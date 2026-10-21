@@ -20,6 +20,7 @@
  */
 import { computed, onMounted, ref } from 'vue';
 import { CeibaLoadingScreen } from '@ceiba/brand';
+import DialogoDeComparticion from '@/components/comparticion/DialogoDeComparticion.vue';
 import CeibaAviso from '@/components/ui/CeibaAviso.vue';
 import CeibaBoton from '@/components/ui/CeibaBoton.vue';
 import CeibaVacio from '@/components/ui/CeibaVacio.vue';
@@ -40,6 +41,8 @@ const colecciones = usarAlmacenDeColecciones();
 const creando = ref(false);
 const aRenombrar = ref<Workspace | null>(null);
 const aBorrar = ref<Workspace | null>(null);
+/** P7: workspace cuyo diálogo de compartir está abierto. */
+const aCompartir = ref<Workspace | null>(null);
 /** Error de la última operación del diálogo abierto. */
 const errorDeDialogo = ref<string | null>(null);
 
@@ -64,10 +67,20 @@ function abrirBorrado(workspace: Workspace): void {
   aBorrar.value = workspace;
 }
 
+/**
+ * P7, primera de las dos pulsaciones. La segunda es «Crear enlace y copiar»
+ * dentro del diálogo, que crea y copia en un solo gesto.
+ */
+function abrirComparticion(workspace: Workspace): void {
+  errorDeDialogo.value = null;
+  aCompartir.value = workspace;
+}
+
 function cerrarDialogos(): void {
   creando.value = false;
   aRenombrar.value = null;
   aBorrar.value = null;
+  aCompartir.value = null;
   errorDeDialogo.value = null;
 }
 
@@ -154,8 +167,18 @@ async function borrar(): Promise<void> {
         :workspace="workspace"
         @renombrar="abrirRenombrado(workspace)"
         @borrar="abrirBorrado(workspace)"
+        @compartir="abrirComparticion(workspace)"
       />
     </ul>
+
+    <DialogoDeComparticion
+      v-if="aCompartir"
+      :abierto="aCompartir !== null"
+      tipo="workspace"
+      :recurso-id="aCompartir.id"
+      :nombre="aCompartir.name"
+      @cerrar="cerrarDialogos"
+    />
 
     <DialogoDeCreacion
       :abierto="creando"
